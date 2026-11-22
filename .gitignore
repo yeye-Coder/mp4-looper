@@ -1,0 +1,21 @@
+# Signing secrets - NEVER commit
+*.jks
+*.keystore
+keystore.properties
+*.pfx
+*.p12
+
+# Machine-specific
+local.properties
+
+# Build output
+android/.gradle/
+android/build/
+android/app/build/
+.idea/
+*.iml
+
+# Distribution binaries (published via GitHub Releases instead)
+*.apk
+*.aab
+*.exe

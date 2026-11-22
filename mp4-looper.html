@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MP4 Looper</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='4' y='4' width='92' height='92' rx='20' fill='%2317171d'/%3E%3Cpath d='M72 32A29 29 0 1 0 79 50' fill='none' stroke='%2325f4ee' stroke-width='8' stroke-linecap='round'/%3E%3Cpath d='M62 18L80 26L64 38Z' fill='%2325f4ee'/%3E%3Cpath d='M42 35L65 50L42 65Z' fill='%23fe2c55'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0e0e12; --panel: #17171d; --card: #20202a; --line: #33333f;
+    --text: #f2f2f6; --muted: #9a9aab; --accent: #25f4ee; --accent2: #fe2c55; --ok: #4ade80;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+  /* No text-selection pop-up (Share | Search…) when pressing buttons or labels on a phone. */
+  body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  input { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  html, body { margin: 0; height: 100%; background: #050507; color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+
+  /* Phone-sized frame: 412 x 915 CSS px (Pixel 9 / Galaxy S-class). Shrinks to fit smaller screens. */
+  .phone {
+    width: 412px; height: 915px; max-width: 100vw; max-height: 100dvh;
+    background: var(--bg); border-radius: 28px; overflow: hidden;
+    display: flex; flex-direction: column; position: relative;
+    box-shadow: 0 0 0 2px #2a2a33, 0 20px 60px rgba(0,0,0,.6);
+  }
+  @media (max-width: 412px), (max-height: 915px) { .phone { border-radius: 0; box-shadow: none; } }
+
+  .topbar { display: flex; gap: 8px; align-items: center; padding: 8px 10px 6px; background: var(--panel); flex: 0 0 auto; }
+  .topbar .name { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .name b { color: var(--text); font-weight: 600; }
+  button { font: inherit; cursor: pointer; border-radius: 10px; color: var(--text);
+    background: var(--card); padding: 9px 10px; font-size: 13px; border: 1px solid var(--line); }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .4; cursor: default; transform: none; }
+  button.primary { background: var(--accent2); border-color: var(--accent2); font-weight: 600; }
+  button.go { background: var(--accent); border-color: var(--accent); color: #002b2a; font-weight: 700; }
+
+  .video-wrap { flex: 0 0 auto; width: 100%; height: min(48%, 460px); background: #000; position: relative; }
+  .video-wrap video { width: 100%; height: 100%; display: block; background: #000; object-fit: contain; }
+  .video-wrap.drag { outline: 3px dashed var(--accent); outline-offset: -6px; }
+  /* Audio files: smaller area, a music picture, and the player controls along the bottom. */
+  .video-wrap.audio { height: min(32%, 300px); }
+  .video-wrap.audio video { position: absolute; left: 0; right: 0; bottom: 0; height: 54px; background: transparent; }
+  .audio-art { position: absolute; left: 0; right: 0; top: 0; bottom: 54px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; padding: 0 16px;
+    background: radial-gradient(circle at 50% 40%, rgba(37,244,238,.18), transparent 65%); }
+  .audio-art .note { font-size: 60px; line-height: 1; }
+  .audio-art .t { font-size: 13px; color: var(--muted); text-align: center; overflow-wrap: anywhere; }
+  .placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; color: var(--muted); font-size: 14px; line-height: 1.5; gap: 14px; cursor: pointer; }
+  .placeholder .big { font-size: 44px; }
+  .placeholder b { color: var(--text); }
+
+  .controls { flex: 1 1 auto; overflow-y: auto; padding: 8px 10px 14px; background: var(--panel); }
+  .status { display: flex; justify-content: space-between; align-items: center; font-size: 12px;
+    color: var(--muted); margin-bottom: 6px; gap: 8px; }
+  .status b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .pill { padding: 2px 8px; border-radius: 99px; background: var(--card); border: 1px solid var(--line); color: var(--text); }
+  .pill.playing { color: var(--ok); border-color: var(--ok); }
+  .pill.gap { color: var(--accent); border-color: var(--accent); }
+
+  .bar { position: relative; height: 16px; background: var(--card); border-radius: 8px; margin: 4px 0 10px; overflow: hidden; cursor: pointer; }
+  .bar .range { position: absolute; top: 0; bottom: 0; background: rgba(37,244,238,.35); }
+  .bar .head { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--accent2); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .field { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 7px 8px; }
+  .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .field input[type=number] { width: 100%; min-width: 0; background: #12121a; border: 1px solid var(--line);
+    color: var(--text); border-radius: 8px; padding: 6px 6px; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .mini { padding: 6px 4px; font-size: 12px; border-radius: 8px; }
+  .field .btns { display: flex; gap: 4px; margin-top: 5px; }
+  .field .btns .mini { flex: 1; }
+  .field input[type=range] { width: 100%; accent-color: var(--accent); }
+  .wide { grid-column: 1 / -1; }
+  .seg { display: flex; gap: 4px; }
+  .seg button { flex: 1; padding: 6px 0; font-size: 13px; border-radius: 8px; }
+  .seg button.on { background: var(--accent); border-color: var(--accent); color: #002b2a; font-weight: 700; }
+  .actions { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 6px; margin-top: 4px; }
+  .actions button { padding: 12px 4px; font-size: 14px; }
+  .pill.saving { color: var(--accent2); border-color: var(--accent2); }
+
+  /* Progress circle shown over the video while saving */
+  .saving-overlay { position: absolute; inset: 0; z-index: 2; background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  .saving-overlay[hidden] { display: none; }
+  .ring { position: relative; width: 132px; height: 132px; }
+  .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 10; }
+  .ring .track { stroke: var(--card); }
+  .ring .prog { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .1s linear; }
+  .ring .pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .saving-overlay .sub { font-size: 13px; color: var(--muted); text-align: center; line-height: 1.5; }
+  .msg { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 6px; line-height: 1.4; }
+  .msg.err { color: #fca5a5; }
+
+  /* Saved sentences */
+  .clips { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
+  .clips-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .clips-head span { font-size: 12px; color: var(--muted); }
+  .clip { display: flex; align-items: center; gap: 6px; padding: 5px 4px; border-top: 1px solid var(--line); }
+  .clip:first-of-type { border-top: 0; }
+  .clip.active { background: rgba(37,244,238,.08); border-radius: 8px; }
+  .clip .no { width: 22px; text-align: center; font-size: 12px; color: var(--muted); }
+  .clip input { flex: 1; min-width: 0; background: transparent; border: 0; color: var(--text); font-size: 13px; padding: 4px; border-radius: 6px; }
+  .clip input:focus { outline: 1px solid var(--line); background: #12121a; }
+  .clip .t { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .clip button { padding: 5px 9px; font-size: 13px; border-radius: 8px; }
+  .empty { font-size: 12px; color: var(--muted); padding: 4px; }
+</style>
+</head>
+<body>
+<div class="phone" id="phone">
+
+  <div class="topbar">
+    <div class="name" id="fileName">No file opened</div>
+    <button class="primary" id="openBtn">📁 Open file</button>
+    <input type="file" id="fileInput" accept="video/*,audio/*,.mp4,.m4v,.webm,.mov,.mp3,.m4a,.wav,.ogg,.aac,.flac" hidden>
+  </div>
+
+  <div class="video-wrap" id="videoWrap">
+    <div class="placeholder" id="placeholder">
+      <div class="big">🎬 🎵</div>
+      <div>Tap here or <b>📁 Open file</b> to choose a video (MP4) or audio (MP3) file.</div>
+      <div>On a computer you can also drag the file here.</div>
+    </div>
+    <div class="audio-art" id="audioArt" hidden><div class="note">🎵</div><div class="t" id="audioName"></div></div>
+    <video id="video" controls playsinline preload="auto" hidden></video>
+    <div class="saving-overlay" id="savingOverlay" hidden>
+      <div class="ring">
+        <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="prog" id="ringProg" cx="60" cy="60" r="52"/></svg>
+        <div class="pct" id="ringPct">0%</div>
+      </div>
+      <div class="sub" id="ringSub">Saving clip…<br>Please keep this window open.</div>
+      <button id="cancelSave">Cancel</button>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="status">
+      <span>Time <b id="curTime">0.0</b> / <b id="durTime">0.0</b> s</span>
+      <span class="pill" id="statePill">idle</span>
+      <span>Loop <b id="loopCount">0</b><span id="loopOf"></span></span>
+    </div>
+
+    <div class="bar" id="bar"><div class="range" id="barRange"></div><div class="head" id="barHead"></div></div>
+
+    <div class="row">
+      <div class="field">
+        <label>Start (A) seconds</label>
+        <input type="number" id="startInput" min="0" step="0.1" value="0">
+        <div class="btns">
+          <button class="mini" id="startNow">Set = now</button>
+          <button class="mini" data-nudge="start" data-d="-0.1">−0.1</button>
+          <button class="mini" data-nudge="start" data-d="0.1">+0.1</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>End (B) seconds</label>
+        <input type="number" id="endInput" min="0" step="0.1" value="5">
+        <div class="btns">
+          <button class="mini" id="endNow">Set = now</button>
+          <button class="mini" data-nudge="end" data-d="-0.1">−0.1</button>
+          <button class="mini" data-nudge="end" data-d="0.1">+0.1</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Gap between repeats: <b id="gapVal">1.0</b> s</label>
+        <input type="range" id="gapInput" min="0" max="10" step="0.1" value="1">
+      </div>
+      <div class="field">
+        <label>Repeat times (0 = forever)</label>
+        <input type="number" id="repeatInput" min="0" step="1" value="0">
+      </div>
+
+      <div class="field wide">
+        <label>Speed</label>
+        <div class="seg" id="speedSeg">
+          <button data-rate="0.5">0.5×</button>
+          <button data-rate="0.75">0.75×</button>
+          <button data-rate="1" class="on">1×</button>
+          <button data-rate="1.25">1.25×</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="go" id="startLoop">▶ Start loop</button>
+      <button id="pauseBtn">Pause</button>
+      <button id="stopBtn">Stop</button>
+      <button id="saveBtn" title="Save the A–B section as a new file">💾 Save</button>
+    </div>
+    <div class="msg" id="msg"></div>
+
+    <div class="clips">
+      <div class="clips-head">
+        <span>Saved sentences (A–B)</span>
+        <button class="mini" id="saveClip">＋ Save current A–B</button>
+      </div>
+      <div id="clipList"><div class="empty">Set A and B, then tap “＋ Save current A–B”.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const el = {
+    open: $('openBtn'), file: $('fileInput'), name: $('fileName'),
+    wrap: $('videoWrap'), ph: $('placeholder'), video: $('video'), audioArt: $('audioArt'), audioName: $('audioName'),
+    cur: $('curTime'), dur: $('durTime'), pill: $('statePill'), loopCount: $('loopCount'), loopOf: $('loopOf'),
+    bar: $('bar'), range: $('barRange'), head: $('barHead'),
+    start: $('startInput'), end: $('endInput'), gap: $('gapInput'), gapVal: $('gapVal'), repeat: $('repeatInput'),
+    startNow: $('startNow'), endNow: $('endNow'), speedSeg: $('speedSeg'),
+    go: $('startLoop'), pause: $('pauseBtn'), stop: $('stopBtn'), save: $('saveBtn'), msg: $('msg'),
+    saveClip: $('saveClip'), clipList: $('clipList'),
+    overlay: $('savingOverlay'), ringProg: $('ringProg'), ringPct: $('ringPct'), ringSub: $('ringSub'), cancelSave: $('cancelSave')
+  };
+  const RING_LEN = 2 * Math.PI * 52;
+  el.ringProg.style.strokeDasharray = RING_LEN;
+  function setRing(fraction) {
+    const f = Math.max(0, Math.min(1, fraction));
+    el.ringProg.style.strokeDashoffset = RING_LEN * (1 - f);
+    el.ringPct.textContent = Math.round(f * 100) + '%';
+  }
+  const video = el.video;
+
+  // ---------- state ----------
+  let loaded = false;
+  let objectUrl = null;
+  let fileBaseName = 'clip';
+  let currentFile = null;    // the opened File (needed to cut MP3s)
+  let isAudio = false;       // true for MP3 / M4A / WAV … files
+  let fileHandle = null;     // handle of the opened file (Chrome desktop)
+  let saveHandle = null;     // where the current clip will be written
+  let fileKey = null;       // identifies the file for saved sentences
+  let clips = [];            // [{a, b, text}]
+  let activeClip = -1;
+  let rate = 1;
+
+  // State machine: 'idle' | 'playing' | 'gap' | 'saving'
+  let mode = 'idle';
+  let loops = 0;
+  let gapTimer = null, gapTick = null;
+  let awaitingSeek = false, awaitingSeekTimeout = null;
+
+  // ---------- helpers ----------
+  const num = (input, fallback = 0) => { const v = parseFloat(input.value); return Number.isFinite(v) ? v : fallback; };
+  const fmt = t => (Number.isFinite(t) ? t : 0).toFixed(1);
+  const A = () => Math.max(0, num(el.start));
+  const B = () => Math.max(0, num(el.end));
+  const gapMs = () => Math.max(0, num(el.gap, 1)) * 1000;
+  const maxRepeats = () => Math.max(0, Math.floor(num(el.repeat, 0)));
+  const say = (s, err) => { el.msg.textContent = s || ''; el.msg.classList.toggle('err', !!err); };
+  const duration = () => video.duration || 0;
+
+  function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+  function recall(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
+
+  function setMode(m) {
+    mode = m;
+    el.pill.className = 'pill' + (m === 'playing' ? ' playing' : m === 'gap' ? ' gap' : m === 'saving' ? ' saving' : '');
+    el.pill.textContent = { idle: 'idle', playing: 'looping', gap: 'gap…', saving: '● saving' }[m];
+    const busy = m === 'saving';
+    [el.go, el.pause, el.save, el.open, el.saveClip].forEach(b => b.disabled = busy);
+    el.stop.textContent = busy ? 'Cancel' : 'Stop';
+    video.controls = !busy;
+    el.overlay.hidden = !busy;
+  }
+
+  function updateLoopLabel() {
+    el.loopCount.textContent = loops;
+    const r = maxRepeats();
+    el.loopOf.textContent = r ? ' / ' + r : ' / ∞';
+  }
+
+  function render() {
+    const t = video.currentTime || 0, d = duration();
+    el.cur.textContent = fmt(t);
+    el.dur.textContent = fmt(d);
+    const dd = d || Math.max(B(), 1);
+    const a = Math.min(A(), dd), b = Math.min(B(), dd);
+    el.range.style.left = (a / dd * 100) + '%';
+    el.range.style.width = (Math.max(0, b - a) / dd * 100) + '%';
+    el.head.style.left = (Math.min(t, dd) / dd * 100) + '%';
+  }
+
+  function updateSpeedUI() {
+    el.speedSeg.querySelectorAll('button').forEach(b => b.classList.toggle('on', parseFloat(b.dataset.rate) === rate));
+  }
+
+  function clearTimers() {
+    clearTimeout(gapTimer); clearInterval(gapTick); clearTimeout(awaitingSeekTimeout);
+    gapTimer = gapTick = awaitingSeekTimeout = null;
+  }
+
+  // ---------- opening a file ----------
+  // handle = Chrome file handle (when available); lets the Save dialog open in the same folder.
+  const AUDIO_EXT = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac)$/i;
+  function loadFile(file, handle) {
+    if (!file) return;
+    const audio = (file.type || '').startsWith('audio/') || AUDIO_EXT.test(file.name);
+    if (file.type && !audio && !file.type.startsWith('video/')) { say('That is not a video or audio file.', true); return; }
+    stopLoop(true);
+    fileHandle = handle || null;
+    currentFile = file;
+    isAudio = audio;
+    el.wrap.classList.toggle('audio', isAudio);
+    el.audioArt.hidden = !isAudio;
+    el.audioName.textContent = file.name;
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(file);
+    loaded = false;
+    video.src = objectUrl;
+    video.playbackRate = rate;
+    video.hidden = false;
+    el.ph.hidden = true;
+    el.name.innerHTML = '';
+    const b = document.createElement('b'); b.textContent = file.name; el.name.appendChild(b);
+    fileBaseName = file.name.replace(/\.[^.]+$/, '') || 'clip';
+    fileKey = 'mp4looper:' + file.name + ':' + file.size;
+    clips = recall(fileKey) || [];
+    activeClip = -1;
+    renderClips();
+    say('Loading ' + file.name + '…');
+  }
+
+  video.addEventListener('loadedmetadata', () => {
+    loaded = true;
+    const d = duration();
+    if (B() <= A() || B() > d) { el.start.value = '0.0'; el.end.value = fmt(Math.min(d, 5)); }
+    render();
+    say('Ready. Play, tap "Set = now" for A and B, then Start loop.');
+  });
+  video.addEventListener('error', () => { loaded = false; say('This file could not be played. MP4 (H.264) video or MP3 audio work best.', true); });
+  video.addEventListener('ratechange', () => { rate = video.playbackRate; updateSpeedUI(); });
+  video.addEventListener('timeupdate', render);
+  video.addEventListener('seeked', render);
+
+  // Precise loop: check the position on every animation frame (~60 times per second).
+  function frame() {
+    if (mode === 'playing') {
+      render();
+      const t = video.currentTime, b = B();
+      if (awaitingSeek) { if (t <= b - 0.1) awaitingSeek = false; }
+      else if (t >= b - 0.02 || video.ended) reachedEnd();
+    } else if (mode === 'saving' && recorder && recorder.state === 'recording') {
+      render();
+      const t = video.currentTime, a = saveRange.a, b = saveRange.b;
+      setRing((t - a) / (b - a));
+      say('Saving… ' + fmt(Math.max(0, t - a)) + ' / ' + fmt(b - a) + ' s');
+      if (t >= b - 0.02 || video.ended) finishSave(true);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------- loop control ----------
+  function startLoop() {
+    if (!loaded) { say('Open a file first.', true); return; }
+    const a = A(), b = B();
+    if (b <= a) { say('End (B) must be greater than Start (A).', true); return; }
+    if (a >= duration()) { say('Start is beyond the video length (' + fmt(duration()) + 's).', true); return; }
+    clearTimers();
+    loops = 0; updateLoopLabel();
+    say('');
+    beginPass();
+  }
+
+  function beginPass() {
+    setMode('playing');
+    awaitingSeek = true;
+    clearTimeout(awaitingSeekTimeout);
+    awaitingSeekTimeout = setTimeout(() => { awaitingSeek = false; }, 1500);
+    video.currentTime = A();
+    video.play().catch(e => say('Could not play: ' + e.message, true));
+  }
+
+  function reachedEnd() {
+    if (mode !== 'playing') return;
+    loops++; updateLoopLabel();
+    const r = maxRepeats();
+    if (r && loops >= r) {
+      video.pause(); setMode('idle');
+      say('Done: ' + loops + ' repeat' + (loops > 1 ? 's' : '') + '.');
+      return;
+    }
+    const gm = gapMs();
+    if (gm <= 0) { beginPass(); return; }   // jump straight back to A
+    video.pause();
+    setMode('gap');
+    const until = performance.now() + gm;
+    clearInterval(gapTick);
+    gapTick = setInterval(() => {
+      say('Next repeat in ' + Math.max(0, (until - performance.now()) / 1000).toFixed(1) + ' s');
+    }, 100);
+    gapTimer = setTimeout(() => { clearInterval(gapTick); say(''); beginPass(); }, gm);
+  }
+
+  // ---------- save A–B as a new video file ----------
+  // Plays the section once at 1× and records it with the browser's MediaRecorder.
+  let recorder = null, recChunks = [], saveRange = null, savedRate = 1, savedVolume = 1, saveKeep = false;
+
+  function pickMimeType(audioOnly) {
+    const types = audioOnly ? [
+      'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm',
+    ] : [
+      'video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/mp4',
+      'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm',
+    ];
+    return types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+  }
+
+  // Ask where to save first (Chrome only allows this dialog right after a tap).
+  // It opens in the folder of the original file when we know it. Returns false if cancelled.
+  async function askWhereToSave(suggestedName, ext, mime, description) {
+    saveHandle = null;
+    pendingName = suggestedName;
+    // (Skipped in the Android app: its WebView offers this dialog but cancels it at once.)
+    if (!window.showSaveFilePicker || window.AndroidSaver) return true;
+    try {
+      saveHandle = await window.showSaveFilePicker({
+        suggestedName,
+        startIn: fileHandle || (isAudio ? 'music' : 'videos'),
+        types: [{ description, accept: { [mime]: ['.' + ext] } }],
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') { say('Save cancelled.'); return false; }
+      saveHandle = null;   // dialog not allowed here – fall back to Downloads
+    }
+    return true;
+  }
+
+  const isMp3 = () => !!currentFile && (currentFile.type === 'audio/mpeg' || /\.mp3$/i.test(currentFile.name));
+
+  async function startSave() {
+    if (!loaded) { say('Open a file first.', true); return; }
+    const a = A(), b = Math.min(B(), duration());
+    if (b <= a) { say('End (B) must be greater than Start (A).', true); return; }
+    if (isMp3()) { saveMp3Clip(a, b); return; }
+
+    const capture = video.captureStream || video.mozCaptureStream;
+    if (!window.MediaRecorder || !capture) { say('This browser cannot record. Use Chrome or Edge.', true); return; }
+    const mimeType = pickMimeType(isAudio);
+    const mp4 = mimeType.includes('mp4');
+    const ext = isAudio ? (mp4 ? 'm4a' : 'webm') : (mp4 ? 'mp4' : 'webm');
+    const saveMime = (isAudio ? 'audio/' : 'video/') + (mp4 ? 'mp4' : 'webm');
+    const suggestedName = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.' + ext;
+    if (!(await askWhereToSave(suggestedName, ext, saveMime, ext.toUpperCase() + (isAudio ? ' audio' : ' video')))) return;
+
+    stopLoop(true);
+    saveRange = { a, b };
+    savedRate = video.playbackRate;
+    savedVolume = video.volume;
+    video.playbackRate = 1;
+    // Silence the speakers only. (volume, not muted: the recording still gets the sound.)
+    video.volume = 0;
+    setRing(0);
+    el.ringSub.innerHTML = 'Saving ' + fmt(a) + '–' + fmt(b) + ' s<br>Please keep this window open.';
+    setMode('saving');
+    say('Preparing…');
+
+    // Jump to A and wait until the frame is ready.
+    await new Promise(res => {
+      video.addEventListener('seeked', res, { once: true });
+      video.currentTime = a;
+    });
+    if (mode !== 'saving') return;   // cancelled meanwhile
+
+    let stream;
+    try { stream = capture.call(video); }
+    catch (e) { say('Could not record: ' + e.message, true); restoreAfterSave(); return; }
+
+    recChunks = [];
+    try {
+      const opts = isAudio ? { audioBitsPerSecond: 192000 } : { videoBitsPerSecond: 8e6 };
+      if (mimeType) opts.mimeType = mimeType;
+      recorder = new MediaRecorder(stream, opts);
+    } catch (e) { say('Could not record: ' + e.message, true); restoreAfterSave(); return; }
+    recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+    recorder.onstop = () => {
+      const type = recorder.mimeType || mimeType || saveMime;
+      if (saveKeep && recChunks.length) downloadClip(new Blob(recChunks, { type }), type);
+      else if (!saveKeep) say('Saving cancelled.');
+      recorder = null; recChunks = [];
+      restoreAfterSave();
+    };
+
+    // Start recording only once the video is really playing, so the first frame is A.
+    video.addEventListener('playing', () => { if (mode === 'saving' && recorder && recorder.state === 'inactive') recorder.start(250); }, { once: true });
+    video.play().catch(e => {
+      if (e.name === 'AbortError') return;   // cancelled before playback started
+      say('Could not play: ' + e.message, true); finishSave(false);
+    });
+  }
+
+  function finishSave(keep) {
+    saveKeep = keep;
+    video.pause();
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    else restoreAfterSave();
+  }
+
+  function restoreAfterSave() {
+    video.playbackRate = savedRate;
+    video.volume = savedVolume;
+    if (mode === 'saving') setMode('idle');
+  }
+
+  let pendingName = 'clip.mp4';
+
+  // ---------- MP3: cut the file directly (instant, original quality, no re-encoding) ----------
+  async function saveMp3Clip(a, b) {
+    const name = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.mp3';
+    if (!(await askWhereToSave(name, 'mp3', 'audio/mpeg', 'MP3 audio'))) return;
+    stopLoop(true);
+    savedRate = video.playbackRate;
+    savedVolume = video.volume;
+    setRing(0);
+    el.ringSub.innerHTML = 'Cutting MP3 ' + fmt(a) + '–' + fmt(b) + ' s';
+    setMode('saving');
+    say('Cutting MP3…');
+    try {
+      const bytes = new Uint8Array(await currentFile.arrayBuffer());
+      if (mode !== 'saving') return;   // cancelled
+      setRing(0.5);
+      const cut = cutMp3(bytes, a, b);
+      if (!cut || !cut.length) throw new Error('no MP3 audio found between A and B');
+      setRing(1);
+      setMode('idle');
+      await downloadClip(new Blob([cut], { type: 'audio/mpeg' }), 'audio/mpeg');
+    } catch (e) {
+      if (mode === 'saving') setMode('idle');
+      say('Could not cut the MP3: ' + e.message, true);
+    }
+  }
+
+  // Walks the MP3 frame by frame and returns the frames that cover A..B.
+  // Each frame is ~26 ms, so the cut is accurate to about 0.03 s.
+  function cutMp3(u, a, b) {
+    const BITRATES = {
+      1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],   // MPEG-1 Layer III
+      2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],      // MPEG-2/2.5 Layer III
+    };
+    const RATES = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+    const isSync = i => i + 1 < u.length && u[i] === 0xFF && (u[i + 1] & 0xE0) === 0xE0;
+
+    let p = 0;
+    // Skip an ID3v2 tag (song title, cover picture…) at the start.
+    if (u[0] === 0x49 && u[1] === 0x44 && u[2] === 0x33) {
+      p = 10 + (((u[6] & 0x7f) << 21) | ((u[7] & 0x7f) << 14) | ((u[8] & 0x7f) << 7) | (u[9] & 0x7f));
+      if (u[5] & 0x10) p += 10;
+    }
+    let t = 0, start = -1, end = -1, first = true;
+    while (p + 4 <= u.length) {
+      if (!isSync(p)) { p++; continue; }
+      const ver = (u[p + 1] >> 3) & 3, layer = (u[p + 1] >> 1) & 3;
+      const bri = u[p + 2] >> 4, sri = (u[p + 2] >> 2) & 3, pad = (u[p + 2] >> 1) & 1;
+      if (ver === 1 || layer !== 1 || bri === 0 || bri === 15 || sri === 3) { p++; continue; }
+      const sr = RATES[ver][sri];
+      const kbps = BITRATES[ver === 3 ? 1 : 2][bri];
+      const spf = ver === 3 ? 1152 : 576;                    // samples per frame
+      const len = Math.floor((spf / 8) * kbps * 1000 / sr) + pad;
+      if (p + len > u.length) break;
+      if (p + len + 1 < u.length && !isSync(p + len)) { p++; continue; }   // not a real frame
+      if (first) {
+        first = false;
+        // The first frame may be a Xing/Info/VBRI header describing the whole file – leave it out.
+        let tag = '';
+        for (let i = p + 4; i < Math.min(p + len, p + 44); i++) tag += String.fromCharCode(u[i]);
+        if (/Xing|Info|VBRI/.test(tag)) { p += len; continue; }
+      }
+      const dur = spf / sr;
+      if (start < 0 && t + dur > a) start = p;
+      if (t >= b) { end = p; break; }
+      t += dur;
+      p += len;
+    }
+    if (start < 0) return null;
+    if (end < 0) end = p;
+    return u.slice(start, end);
+  }
+
+  // Android app: pass the file to the app in pieces (base64), which writes it to the Download folder.
+  async function saveViaAndroid(blob, name, type) {
+    const id = window.AndroidSaver.begin(name, type.split(';')[0]);
+    if (!id) throw new Error('the phone refused to create the file');
+    const CHUNK = 3 * 256 * 1024;   // multiple of 3 so each piece encodes cleanly
+    try {
+      for (let pos = 0; pos < blob.size; pos += CHUNK) {
+        const bytes = new Uint8Array(await blob.slice(pos, pos + CHUNK).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        if (!window.AndroidSaver.append(id, btoa(bin))) throw new Error('writing failed');
+        say('Writing file… ' + Math.min(100, Math.round((pos + CHUNK) / blob.size * 100)) + '%');
+      }
+      const where = window.AndroidSaver.finish(id);
+      if (!where) throw new Error('finishing the file failed');
+      return where;
+    } catch (e) {
+      window.AndroidSaver.abort(id);
+      throw e;
+    }
+  }
+  async function downloadClip(blob, type) {
+    const size = (blob.size / 1048576).toFixed(1) + ' MB';
+    if (saveHandle) {
+      try {
+        const w = await saveHandle.createWritable();
+        await w.write(blob);
+        await w.close();
+        say('Saved "' + saveHandle.name + '" (' + size + ').');
+        return;
+      } catch (e) {
+        say('Could not write to that folder (' + e.message + '). Saving to Downloads instead.', true);
+      }
+    }
+    const name = pendingName;
+    if (window.AndroidSaver) {   // running inside the Android app
+      try {
+        const where = await saveViaAndroid(blob, name, type);
+        say('Saved "' + name + '" (' + size + ') to ' + where + '.');
+      } catch (e) {
+        say('Could not save: ' + e.message, true);
+      }
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    say('Saved "' + name + '" (' + size + ') to your Downloads folder.');
+  }
+
+  function stopLoop(silent) {
+    if (mode === 'saving') { finishSave(false); return; }
+    clearTimers();
+    awaitingSeek = false;
+    if (mode !== 'idle') video.pause();
+    setMode('idle');
+    if (!silent) say('Stopped.');
+  }
+
+  // ---------- saved sentences ----------
+  function saveClips() { if (fileKey) store(fileKey, clips); }
+
+  function renderClips() {
+    el.clipList.innerHTML = '';
+    if (!clips.length) {
+      el.clipList.innerHTML = '<div class="empty">Set A and B, then tap “＋ Save current A–B”.</div>';
+      return;
+    }
+    clips.forEach((c, i) => {
+      const row = document.createElement('div');
+      row.className = 'clip' + (i === activeClip ? ' active' : '');
+      const no = document.createElement('span'); no.className = 'no'; no.textContent = i + 1;
+      const text = document.createElement('input');
+      text.value = c.text || ''; text.placeholder = 'Type the sentence (optional)';
+      text.addEventListener('change', () => { c.text = text.value; saveClips(); });
+      const t = document.createElement('span'); t.className = 't'; t.textContent = fmt(c.a) + '–' + fmt(c.b);
+      const play = document.createElement('button'); play.textContent = '▶'; play.title = 'Loop this sentence';
+      play.addEventListener('click', () => {
+        el.start.value = fmt(c.a); el.end.value = fmt(c.b);
+        activeClip = i; renderClips(); startLoop();
+      });
+      const del = document.createElement('button'); del.textContent = '✕'; del.title = 'Delete';
+      del.addEventListener('click', () => {
+        clips.splice(i, 1);
+        if (activeClip === i) activeClip = -1; else if (activeClip > i) activeClip--;
+        saveClips(); renderClips();
+      });
+      row.append(no, text, t, play, del);
+      el.clipList.appendChild(row);
+    });
+  }
+
+  el.saveClip.addEventListener('click', () => {
+    if (!loaded) { say('Open a file first.', true); return; }
+    const a = A(), b = B();
+    if (b <= a) { say('End (B) must be greater than Start (A).', true); return; }
+    clips.push({ a, b, text: '' });
+    clips.sort((x, y) => x.a - y.a);
+    activeClip = clips.findIndex(c => c.a === a && c.b === b);
+    saveClips(); renderClips();
+    say('Saved sentence ' + (activeClip + 1) + '.');
+  });
+
+  // ---------- UI wiring ----------
+  // Prefer Chrome's file picker (gives a handle, so Save can start in the same folder).
+  async function openVideo() {
+    if (!window.showOpenFilePicker || window.AndroidSaver) { el.file.click(); return; }
+    try {
+      const [h] = await window.showOpenFilePicker({
+        startIn: fileHandle || 'videos',
+        types: [{ description: 'Video or audio', accept: {
+          'video/*': ['.mp4', '.m4v', '.webm', '.mov'],
+          'audio/*': ['.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'],
+        } }],
+      });
+      loadFile(await h.getFile(), h);
+    } catch (e) {
+      if (e.name !== 'AbortError') el.file.click();   // picker not allowed here – use the classic one
+    }
+  }
+  el.open.addEventListener('click', openVideo);
+  el.ph.addEventListener('click', openVideo);
+  el.file.addEventListener('change', () => { loadFile(el.file.files[0]); el.file.value = ''; });
+
+  ['dragenter', 'dragover'].forEach(t => el.wrap.addEventListener(t, e => { e.preventDefault(); el.wrap.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(t => el.wrap.addEventListener(t, () => el.wrap.classList.remove('drag')));
+  el.wrap.addEventListener('drop', async e => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    const item = e.dataTransfer.items && e.dataTransfer.items[0];
+    // Must be requested during the drop event itself.
+    const handlePromise = item && item.getAsFileSystemHandle ? item.getAsFileSystemHandle().catch(() => null) : null;
+    const handle = handlePromise ? await handlePromise : null;
+    loadFile(file, handle && handle.kind === 'file' ? handle : null);
+  });
+
+  el.go.addEventListener('click', startLoop);
+  el.stop.addEventListener('click', () => stopLoop(false));
+  el.save.addEventListener('click', startSave);
+  el.cancelSave.addEventListener('click', () => { if (mode === 'saving') finishSave(false); });
+  el.pause.addEventListener('click', () => {
+    if (!loaded) return;
+    if (mode !== 'idle') { stopLoop(true); say('Paused (tap Start loop to restart from A).'); }
+    else if (video.paused) video.play(); else video.pause();
+  });
+
+  el.startNow.addEventListener('click', () => { el.start.value = fmt(video.currentTime); activeClip = -1; render(); });
+  el.endNow.addEventListener('click', () => { el.end.value = fmt(video.currentTime); activeClip = -1; render(); });
+
+  document.querySelectorAll('[data-nudge]').forEach(btn => btn.addEventListener('click', () => {
+    const input = btn.dataset.nudge === 'start' ? el.start : el.end;
+    const v = Math.max(0, num(input) + parseFloat(btn.dataset.d));
+    input.value = v.toFixed(1);
+    activeClip = -1;
+    previewAt(v);
+  }));
+
+  // Show the exact frame at A or B while adjusting (only when not looping/saving).
+  function previewAt(t) {
+    render();
+    if (mode !== 'idle' || !loaded || !Number.isFinite(t)) return;
+    video.pause();
+    video.currentTime = Math.max(0, Math.min(t, duration()));
+  }
+
+  el.speedSeg.addEventListener('click', e => {
+    const b = e.target.closest('button[data-rate]');
+    if (!b) return;
+    rate = parseFloat(b.dataset.rate);
+    video.playbackRate = rate;
+    updateSpeedUI();
+  });
+
+  el.gap.addEventListener('input', () => { el.gapVal.textContent = num(el.gap).toFixed(1); });
+  el.repeat.addEventListener('input', updateLoopLabel);
+  [el.start, el.end].forEach(i => i.addEventListener('input', () => { activeClip = -1; previewAt(parseFloat(i.value)); }));
+
+  el.bar.addEventListener('click', e => {
+    if (!loaded) return;
+    const r = el.bar.getBoundingClientRect();
+    video.currentTime = ((e.clientX - r.left) / r.width) * duration();
+  });
+
+  updateLoopLabel(); render(); updateSpeedUI();
+})();
+</script>
+</body>
+</html>
