@@ -21,8 +21,8 @@ android {
         applicationId = "com.mp4looper.app"
         minSdk = 29          // Android 10
         targetSdk = 36       // Android 16
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
     }
 
     signingConfigs {

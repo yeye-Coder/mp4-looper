@@ -94,7 +94,18 @@
   .ring .prog { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .1s linear; }
   .ring .pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .saving-overlay .sub { font-size: 13px; color: var(--muted); text-align: center; line-height: 1.5; }
+  .saving-overlay .sub { font-size: 13px; color: var(--muted); text-align: center; line-height: 1.5;
+    white-space: pre-line; overflow-wrap: anywhere; padding: 0 20px; }
+  /* Spinning arc while the length of the job isn't known */
+  .ring.spin svg { animation: ringspin 0.9s linear infinite; }
+  @keyframes ringspin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+  /* Result: ✓ saved / ✕ failed */
+  .ring.ok .prog { stroke: var(--ok); }
+  .ring.fail .prog { stroke: var(--accent2); }
+  .ring.ok .pct, .ring.fail .pct { font-size: 56px; }
+  .ring.ok .pct { color: var(--ok); }
+  .ring.fail .pct { color: var(--accent2); }
+  .saving-overlay .done-title { font-size: 17px; font-weight: 700; }
   .msg { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 6px; line-height: 1.4; }
   .msg.err { color: #fca5a5; }
 
@@ -131,10 +142,11 @@
     <div class="audio-art" id="audioArt" hidden><div class="note">🎵</div><div class="t" id="audioName"></div></div>
     <video id="video" controls playsinline preload="auto" hidden></video>
     <div class="saving-overlay" id="savingOverlay" hidden>
-      <div class="ring">
+      <div class="ring" id="ring">
         <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="prog" id="ringProg" cx="60" cy="60" r="52"/></svg>
         <div class="pct" id="ringPct">0%</div>
       </div>
+      <div class="done-title" id="ringTitle" hidden></div>
       <div class="sub" id="ringSub">Saving clip…<br>Please keep this window open.</div>
       <button id="cancelSave">Cancel</button>
     </div>
@@ -220,11 +232,26 @@
     startNow: $('startNow'), endNow: $('endNow'), speedSeg: $('speedSeg'),
     go: $('startLoop'), pause: $('pauseBtn'), stop: $('stopBtn'), save: $('saveBtn'), msg: $('msg'),
     saveClip: $('saveClip'), clipList: $('clipList'),
-    overlay: $('savingOverlay'), ringProg: $('ringProg'), ringPct: $('ringPct'), ringSub: $('ringSub'), cancelSave: $('cancelSave')
+    overlay: $('savingOverlay'), ring: $('ring'), ringProg: $('ringProg'), ringPct: $('ringPct'), ringTitle: $('ringTitle'),
+    ringSub: $('ringSub'), cancelSave: $('cancelSave')
   };
   const RING_LEN = 2 * Math.PI * 52;
   el.ringProg.style.strokeDasharray = RING_LEN;
+  // Spinning circle (used when the progress can't be measured, e.g. a quick cut).
+  function ringSpin() {
+    el.ring.className = 'ring spin';
+    el.ringProg.style.strokeDashoffset = RING_LEN * 0.72;
+    el.ringPct.textContent = '';
+  }
+  // Big ✓ or ✕ when saving has finished.
+  function ringResult(ok) {
+    el.ring.className = 'ring ' + (ok ? 'ok' : 'fail');
+    el.ringProg.style.strokeDashoffset = 0;
+    el.ringPct.textContent = ok ? '✓' : '✕';
+  }
+  // Circle that fills up: 0 … 1
   function setRing(fraction) {
+    el.ring.className = 'ring';
     const f = Math.max(0, Math.min(1, fraction));
     el.ringProg.style.strokeDashoffset = RING_LEN * (1 - f);
     el.ringPct.textContent = Math.round(f * 100) + '%';
@@ -235,7 +262,9 @@
   let loaded = false;
   let objectUrl = null;
   let fileBaseName = 'clip';
-  let currentFile = null;    // the opened File (needed to cut MP3s)
+  let currentFile = null;    // the opened File (needed to cut MP3s and MP4s)
+  let mp4Index = null;       // index of an MP4/MOV/M4A file, so Save can cut it directly
+  let mp4Indexing = null;    // promise while that index is being read
   let isAudio = false;       // true for MP3 / M4A / WAV … files
   let fileHandle = null;     // handle of the opened file (Chrome desktop)
   let saveHandle = null;     // where the current clip will be written
@@ -311,6 +340,12 @@
     fileHandle = handle || null;
     currentFile = file;
     isAudio = audio;
+    mp4Index = null; mp4Indexing = null;
+    if (isMp4Family(file)) {
+      const job = mp4Indexing = indexMp4(file).catch(() => null).then(m => {
+        if (mp4Indexing === job) { mp4Index = m; mp4Indexing = null; }
+      });
+    }
     el.wrap.classList.toggle('audio', isAudio);
     el.audioArt.hidden = !isAudio;
     el.audioName.textContent = file.name;
@@ -379,7 +414,8 @@
     clearTimeout(awaitingSeekTimeout);
     awaitingSeekTimeout = setTimeout(() => { awaitingSeek = false; }, 1500);
     video.currentTime = A();
-    video.play().catch(e => say('Could not play: ' + e.message, true));
+    // AbortError = stopped/paused before playback began (e.g. Save was pressed) – not a problem.
+    video.play().catch(e => { if (e.name !== 'AbortError') say('Could not play: ' + e.message, true); });
   }
 
   function reachedEnd() {
@@ -404,7 +440,8 @@
   }
 
   // ---------- save A–B as a new video file ----------
-  // Plays the section once at 1× and records it with the browser's MediaRecorder.
+  // MP4 / MOV / M4A and MP3 are cut directly (see below). Other formats are played once at 1×
+  // and recorded with the browser's MediaRecorder.
   let recorder = null, recChunks = [], saveRange = null, savedRate = 1, savedVolume = 1, saveKeep = false;
 
   function pickMimeType(audioOnly) {
@@ -444,7 +481,10 @@
     const a = A(), b = Math.min(B(), duration());
     if (b <= a) { say('End (B) must be greater than Start (A).', true); return; }
     if (isMp3()) { saveMp3Clip(a, b); return; }
+    if (mp4Indexing) await mp4Indexing;   // normally finished long ago (starts when the file opens)
+    if (mp4Index) { saveMp4Clip(a, b); return; }
 
+    // Other formats (WebM, WAV, fragmented MP4…): play the section once and record it.
     const capture = video.captureStream || video.mozCaptureStream;
     if (!window.MediaRecorder || !capture) { say('This browser cannot record. Use Chrome or Edge.', true); return; }
     const mimeType = pickMimeType(isAudio);
@@ -454,16 +494,12 @@
     const suggestedName = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.' + ext;
     if (!(await askWhereToSave(suggestedName, ext, saveMime, ext.toUpperCase() + (isAudio ? ' audio' : ' video')))) return;
 
-    stopLoop(true);
+    beginSaving('record', 'Saving ' + fmt(a) + '–' + fmt(b) + ' s\nPlease keep this window open.');
     saveRange = { a, b };
-    savedRate = video.playbackRate;
-    savedVolume = video.volume;
     video.playbackRate = 1;
     // Silence the speakers only. (volume, not muted: the recording still gets the sound.)
     video.volume = 0;
     setRing(0);
-    el.ringSub.innerHTML = 'Saving ' + fmt(a) + '–' + fmt(b) + ' s<br>Please keep this window open.';
-    setMode('saving');
     say('Preparing…');
 
     // Jump to A and wait until the frame is ready.
@@ -471,46 +507,112 @@
       video.addEventListener('seeked', res, { once: true });
       video.currentTime = a;
     });
-    if (mode !== 'saving') return;   // cancelled meanwhile
+    if (saveKind !== 'record' || saveEnding) return;   // cancelled meanwhile
 
     let stream;
     try { stream = capture.call(video); }
-    catch (e) { say('Could not record: ' + e.message, true); restoreAfterSave(); return; }
+    catch (e) { endSave(false, 'Could not record: ' + e.message); return; }
 
     recChunks = [];
     try {
       const opts = isAudio ? { audioBitsPerSecond: 192000 } : { videoBitsPerSecond: 8e6 };
       if (mimeType) opts.mimeType = mimeType;
       recorder = new MediaRecorder(stream, opts);
-    } catch (e) { say('Could not record: ' + e.message, true); restoreAfterSave(); return; }
+    } catch (e) { endSave(false, 'Could not record: ' + e.message); return; }
     recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const type = recorder.mimeType || mimeType || saveMime;
-      if (saveKeep && recChunks.length) downloadClip(new Blob(recChunks, { type }), type);
-      else if (!saveKeep) say('Saving cancelled.');
+      const chunks = recChunks;
       recorder = null; recChunks = [];
-      restoreAfterSave();
+      if (!saveKeep || !chunks.length) { endSave(null, 'Saving cancelled.'); return; }
+      ringSpin();
+      el.ringSub.textContent = 'Writing the file…';
+      try { endSave(true, await downloadClip(new Blob(chunks, { type }), type)); }
+      catch (e) { endSave(false, 'Could not save: ' + e.message); }
     };
 
     // Start recording only once the video is really playing, so the first frame is A.
     video.addEventListener('playing', () => { if (mode === 'saving' && recorder && recorder.state === 'inactive') recorder.start(250); }, { once: true });
     video.play().catch(e => {
       if (e.name === 'AbortError') return;   // cancelled before playback started
-      say('Could not play: ' + e.message, true); finishSave(false);
+      recorder = null;
+      endSave(false, 'Could not play: ' + e.message);
     });
   }
 
+  // ---------- saving: progress circle, result, then back to what was playing ----------
+  let saveKind = null;        // 'cut' (direct, quick) | 'record' (plays A–B once)
+  let saveEnding = false;     // the result is being shown
+  let saveStarted = 0;
+  let resultTimer = null;
+  let resumeState = null;     // what was playing before Save
+
+  function beginSaving(kind, text) {
+    resumeState = {
+      loop: mode === 'playing' || mode === 'gap', gap: mode === 'gap',
+      playing: !video.paused, time: video.currentTime || 0, loops,
+    };
+    stopLoop(true);
+    savedRate = video.playbackRate;
+    savedVolume = video.volume;
+    saveKind = kind; saveEnding = false; saveStarted = performance.now();
+    ringSpin();
+    el.ringTitle.hidden = true;
+    el.ringSub.textContent = text;
+    el.cancelSave.hidden = kind !== 'record';   // a direct cut takes a moment only
+    setMode('saving');
+    say('Saving…');
+  }
+
+  // ok: true = saved, false = failed, null = cancelled
+  async function endSave(ok, text) {
+    if (saveEnding) return;
+    saveEnding = true;
+    video.pause();
+    video.playbackRate = savedRate;
+    video.volume = savedVolume;
+    say(text, ok === false);
+    if (ok === null) { closeSaveOverlay(); return; }
+    // Keep the circle visible for a moment, so a very quick save doesn't just flash.
+    const wait = 900 - (performance.now() - saveStarted);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    ringResult(ok);
+    el.ringTitle.textContent = ok ? 'Saved' : 'Could not save';
+    el.ringTitle.hidden = false;
+    el.ringSub.textContent = ok ? text.replace(/^Saved /, '') : text;
+    el.cancelSave.hidden = true;
+    resultTimer = setTimeout(closeSaveOverlay, ok ? 1600 : 3000);
+  }
+
+  function closeSaveOverlay() {
+    clearTimeout(resultTimer); resultTimer = null;
+    saveKind = null; saveEnding = false;
+    el.ringTitle.hidden = true;
+    el.cancelSave.hidden = false;
+    setMode('idle');
+    const r = resumeState; resumeState = null;
+    if (!r || !loaded) return;
+    // Continue exactly where it was before Save.
+    if (r.loop) {
+      loops = r.loops; updateLoopLabel();
+      if (r.gap || r.time < A() || r.time >= B() - 0.05) { beginPass(); return; }
+      setMode('playing');
+      awaitingSeek = false;
+      video.currentTime = r.time;
+      video.play().catch(() => {});
+    } else {
+      video.currentTime = r.time;
+      if (r.playing) video.play().catch(() => {});
+    }
+  }
+
   function finishSave(keep) {
+    if (resultTimer) { closeSaveOverlay(); return; }   // result showing: tap to skip the wait
+    if (saveKind !== 'record' || saveEnding) return;   // a direct cut finishes by itself
     saveKeep = keep;
     video.pause();
     if (recorder && recorder.state !== 'inactive') recorder.stop();
-    else restoreAfterSave();
-  }
-
-  function restoreAfterSave() {
-    video.playbackRate = savedRate;
-    video.volume = savedVolume;
-    if (mode === 'saving') setMode('idle');
+    else endSave(null, 'Saving cancelled.');
   }
 
   let pendingName = 'clip.mp4';
@@ -519,25 +621,14 @@
   async function saveMp3Clip(a, b) {
     const name = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.mp3';
     if (!(await askWhereToSave(name, 'mp3', 'audio/mpeg', 'MP3 audio'))) return;
-    stopLoop(true);
-    savedRate = video.playbackRate;
-    savedVolume = video.volume;
-    setRing(0);
-    el.ringSub.innerHTML = 'Cutting MP3 ' + fmt(a) + '–' + fmt(b) + ' s';
-    setMode('saving');
-    say('Cutting MP3…');
+    beginSaving('cut', 'Saving ' + fmt(a) + '–' + fmt(b) + ' s…');
     try {
       const bytes = new Uint8Array(await currentFile.arrayBuffer());
-      if (mode !== 'saving') return;   // cancelled
-      setRing(0.5);
       const cut = cutMp3(bytes, a, b);
       if (!cut || !cut.length) throw new Error('no MP3 audio found between A and B');
-      setRing(1);
-      setMode('idle');
-      await downloadClip(new Blob([cut], { type: 'audio/mpeg' }), 'audio/mpeg');
+      endSave(true, await downloadClip(new Blob([cut], { type: 'audio/mpeg' }), 'audio/mpeg'));
     } catch (e) {
-      if (mode === 'saving') setMode('idle');
-      say('Could not cut the MP3: ' + e.message, true);
+      endSave(false, 'Could not save: ' + e.message);
     }
   }
 
@@ -587,6 +678,338 @@
     return u.slice(start, end);
   }
 
+  // ==== MP4 CUT BEGIN ====
+  // ---------- MP4 / MOV / M4A: real cut (instant, original quality, no re-encoding) ----------
+  // Reads the file's index (the 'moov' box: where every video frame / audio piece is and when it plays),
+  // keeps the pieces that cover A..B and writes a new file that copies those bytes unchanged.
+  // Video can only start on a key frame, so the copy starts at the key frame just before A, and an
+  // edit list inside the new file tells players to start showing at exactly A.
+  const MP4_EXT = /\.(mp4|m4v|mov|m4a|3gp)$/i;
+  const isMp4Family = f => !!f && (MP4_EXT.test(f.name) || /^(video|audio)\/(mp4|quicktime|x-m4a|3gpp)$/.test(f.type));
+
+  const fourcc = (u, p) => String.fromCharCode(u[p], u[p + 1], u[p + 2], u[p + 3]);
+  const dvOf = u => new DataView(u.buffer, u.byteOffset, u.byteLength);
+  const rd64 = (dv, p) => dv.getUint32(p) * 4294967296 + dv.getUint32(p + 4);
+  const rdI64 = (dv, p) => dv.getInt32(p) * 4294967296 + dv.getUint32(p + 4);
+
+  // Child boxes inside the payload of `box` (or the whole buffer): [{type, s: start, p: payload, e: end}]
+  function kids(u, box) {
+    const dv = dvOf(u), out = [];
+    let s = box ? box.p : 0;
+    const e = box ? box.e : u.length;
+    while (s + 8 <= e) {
+      let size = dv.getUint32(s), p = s + 8;
+      if (size === 1) { size = rd64(dv, s + 8); p = s + 16; } else if (size === 0) size = e - s;
+      if (size < p - s || s + size > e) break;
+      out.push({ type: fourcc(u, s + 4), s, p, e: s + size });
+      s += size;
+    }
+    return out;
+  }
+  const kid = (u, box, type) => box ? kids(u, box).find(k => k.type === type) : undefined;
+
+  // Reads only the small index parts of the file. Returns null when the file can't be cut this way
+  // (e.g. fragmented MP4) – the app then falls back to recording.
+  async function indexMp4(file) {
+    const read = async (off, len) => new Uint8Array(await file.slice(off, off + len).arrayBuffer());
+    let pos = 0, ftyp = null, moov = null;
+    while (pos + 8 <= file.size) {
+      const h = await read(pos, 16), dv = dvOf(h), type = fourcc(h, 4);
+      let size = dv.getUint32(0), hdr = 8;
+      if (size === 1) { size = rd64(dv, 8); hdr = 16; } else if (size === 0) size = file.size - pos;
+      if (size < hdr) return null;
+      if (type === 'moof') return null;
+      if (type === 'ftyp') ftyp = await read(pos, size);
+      if (type === 'moov') moov = await read(pos, size);
+      pos += size;
+    }
+    if (!moov) return null;
+    const mv = kids(moov)[0];
+    if (!mv || kid(moov, mv, 'mvex')) return null;
+    const mvhd = kid(moov, mv, 'mvhd');
+    if (!mvhd) return null;
+    const movieTs = dvOf(moov).getUint32(mvhd.p + (moov[mvhd.p] === 1 ? 20 : 12));
+    const tracks = [];
+    for (const t of kids(moov, mv)) if (t.type === 'trak') { const tr = parseTrak(moov, t, movieTs); if (tr) tracks.push(tr); }
+    if (!tracks.length || !movieTs) return null;
+    const extra = kids(moov, mv).filter(k => k.type === 'udta' || k.type === 'meta').map(k => moov.slice(k.s, k.e));
+    return { ftyp, mvhd: moov.slice(mvhd.s, mvhd.e), movieTs, tracks, extra };
+  }
+
+  function parseTrak(u, trak, movieTs) {
+    const dv = dvOf(u);
+    const tkhd = kid(u, trak, 'tkhd'), mdia = kid(u, trak, 'mdia');
+    const mdhd = kid(u, mdia, 'mdhd'), hdlr = kid(u, mdia, 'hdlr'), minf = kid(u, mdia, 'minf');
+    const stbl = kid(u, minf, 'stbl');
+    if (!tkhd || !mdhd || !hdlr || !stbl) return null;
+    const handler = fourcc(u, hdlr.p + 8);
+    if (handler !== 'vide' && handler !== 'soun') return null;   // keep only picture and sound
+    const ts = dv.getUint32(mdhd.p + (u[mdhd.p] === 1 ? 20 : 12));
+    const box = {};
+    for (const k of kids(u, stbl)) box[k.type] = k;
+    if (!ts || !box.stsd || !box.stts || !box.stsc || !(box.stsz || box.stz2) || !(box.stco || box.co64)) return null;
+
+    // Sample sizes
+    let n, size;
+    if (box.stsz) {
+      const p = box.stsz.p, fixed = dv.getUint32(p + 4);
+      n = dv.getUint32(p + 8); size = new Uint32Array(n);
+      for (let i = 0; i < n; i++) size[i] = fixed || dv.getUint32(p + 12 + 4 * i);
+    } else {
+      const p = box.stz2.p, fs = u[p + 7];
+      n = dv.getUint32(p + 8); size = new Uint32Array(n);
+      for (let i = 0; i < n; i++) size[i] = fs === 16 ? dv.getUint16(p + 12 + 2 * i) : fs === 8 ? u[p + 12 + i]
+        : (u[p + 12 + (i >> 1)] >> ((i & 1) ? 0 : 4)) & 15;
+    }
+    if (!n) return null;
+
+    // Decode times and durations
+    const dts = new Float64Array(n), dur = new Uint32Array(n);
+    {
+      const p = box.stts.p, c = dv.getUint32(p + 4);
+      let i = 0, t = 0, d = 0;
+      for (let e = 0; e < c; e++) {
+        const cnt = dv.getUint32(p + 8 + 8 * e); d = dv.getUint32(p + 12 + 8 * e);
+        for (let k = 0; k < cnt && i < n; k++, i++) { dts[i] = t; dur[i] = d; t += d; }
+      }
+      for (; i < n; i++) { dts[i] = t; dur[i] = d; t += d; }
+    }
+    // Display-time offsets (B-frames)
+    const cts = new Int32Array(n);
+    let cttsVer = -1;
+    if (box.ctts) {
+      const p = box.ctts.p, c = dv.getUint32(p + 4);
+      cttsVer = u[p];
+      let i = 0;
+      for (let e = 0; e < c; e++) {
+        const cnt = dv.getUint32(p + 8 + 8 * e), o = dv.getInt32(p + 12 + 8 * e);
+        for (let k = 0; k < cnt && i < n; k++, i++) cts[i] = o;
+      }
+    }
+    // Key frames (no table = every sample is a key frame, e.g. audio)
+    let sync = null;
+    if (box.stss) {
+      sync = new Uint8Array(n);
+      const p = box.stss.p, c = dv.getUint32(p + 4);
+      for (let e = 0; e < c; e++) { const s = dv.getUint32(p + 8 + 4 * e) - 1; if (s >= 0 && s < n) sync[s] = 1; }
+    }
+    // Where each sample is in the file, and which sample description it uses
+    const off = new Float64Array(n), sdi = new Uint32Array(n);
+    {
+      const co = box.co64 || box.stco, big = !!box.co64, cp = co.p, nChunks = dv.getUint32(cp + 4);
+      const sp = box.stsc.p, ne = dv.getUint32(sp + 4);
+      let i = 0;
+      for (let e = 0; e < ne && i < n; e++) {
+        const first = dv.getUint32(sp + 8 + 12 * e), spc = dv.getUint32(sp + 12 + 12 * e), d = dv.getUint32(sp + 16 + 12 * e);
+        const next = e + 1 < ne ? dv.getUint32(sp + 8 + 12 * (e + 1)) : nChunks + 1;
+        for (let c = first; c < next && c <= nChunks && i < n; c++) {
+          let o = big ? rd64(dv, cp + 8 + 8 * (c - 1)) : dv.getUint32(cp + 8 + 4 * (c - 1));
+          for (let k = 0; k < spc && i < n; k++, i++) { off[i] = o; sdi[i] = d; o += size[i]; }
+        }
+      }
+      if (i < n) return null;
+    }
+    // Existing edit list: converts media time to movie (playback) time
+    let empty = 0, mediaStart = 0;
+    const elst = kid(u, kid(u, trak, 'edts'), 'elst');
+    if (elst) {
+      const p = elst.p, v = u[p], c = dv.getUint32(p + 4);
+      let q = p + 8;
+      for (let e = 0; e < c; e++) {
+        const segDur = v === 1 ? rd64(dv, q) : dv.getUint32(q);
+        const mt = v === 1 ? rdI64(dv, q + 8) : dv.getInt32(q + 4);
+        q += v === 1 ? 20 : 12;
+        if (mt === -1) { empty += segDur; continue; }
+        mediaStart = mt; break;
+      }
+    }
+    const raw = k => u.slice(k.s, k.e);
+    return {
+      handler, ts, n, size, dts, dur, cts, cttsVer, sync, off, sdi,
+      shift: empty / movieTs - mediaStart / ts,   // seconds to add to a media time to get the playback time
+      tkhd: raw(tkhd), mdhd: raw(mdhd), hdlr: raw(hdlr), stsd: raw(box.stsd),
+      minfOther: kids(u, minf).filter(k => k.type !== 'stbl').map(raw),
+    };
+  }
+
+  // --- writing boxes ---
+  function concatBytes(parts) {
+    let len = 0; for (const p of parts) len += p.length;
+    const o = new Uint8Array(len); let q = 0;
+    for (const p of parts) { o.set(p, q); q += p.length; }
+    return o;
+  }
+  function putType(o, type) { for (let i = 0; i < 4; i++) o[4 + i] = type.charCodeAt(i); }
+  function mkBox(type, parts) {
+    const body = concatBytes(parts), o = new Uint8Array(8 + body.length);
+    dvOf(o).setUint32(0, o.length); putType(o, type); o.set(body, 8);
+    return o;
+  }
+  // Full box made of 32-bit numbers (negative numbers are written as two's complement).
+  function wordBox(type, version, words) {
+    const o = new Uint8Array(12 + 4 * words.length), dv = dvOf(o);
+    dv.setUint32(0, o.length); putType(o, type); dv.setUint32(8, version << 24);
+    for (let i = 0; i < words.length; i++) dv.setUint32(12 + 4 * i, words[i] >>> 0);
+    return o;
+  }
+  // Duration field of mvhd/tkhd/mdhd (position depends on the box version).
+  function setDuration(b, v1Pos, v0Pos, value) {
+    const dv = dvOf(b);
+    if (b[8] === 1) { dv.setUint32(v1Pos, Math.floor(value / 4294967296)); dv.setUint32(v1Pos + 4, value >>> 0); }
+    else dv.setUint32(v0Pos, Math.min(value, 0xFFFFFFFF));
+  }
+
+  // Builds the new file for A..B (seconds) as a Blob. The sample data are slices of the original
+  // file, so nothing large is copied into memory.
+  function buildMp4Cut(file, m, a, b, type) {
+    const picked = [];
+    for (const tr of m.tracks) {
+      const t = i => (tr.dts[i] + tr.cts[i]) / tr.ts + tr.shift;
+      let k = -1, firstSync = -1;
+      for (let i = 0; i < tr.n; i++) {
+        if (tr.sync && !tr.sync[i]) continue;
+        if (firstSync < 0) firstSync = i;
+        if (t(i) <= a + 1e-4) k = i;
+        else if (tr.dts[i] / tr.ts + tr.shift > a + 30) break;
+      }
+      if (k < 0) k = Math.max(0, firstSync);
+      let j = -1;
+      for (let i = k; i < tr.n; i++) {
+        if (t(i) < b - 1e-4) j = i;
+        else if (tr.dts[i] / tr.ts + tr.shift > b + 30) break;
+      }
+      if (j < k) continue;
+      let first = Infinity, last = -Infinity;
+      for (let i = k; i <= j; i++) { first = Math.min(first, t(i)); last = Math.max(last, t(i) + tr.dur[i] / tr.ts); }
+      const begin = Math.max(a, first), end = Math.min(b, last);
+      if (end <= begin) continue;
+      picked.push({
+        tr, k, j,
+        mediaTime: Math.max(0, Math.round((begin - tr.shift) * tr.ts) - tr.dts[k]),
+        empty: Math.round((begin - a) * m.movieTs),
+        seg: Math.round((end - begin) * m.movieTs),
+      });
+    }
+    if (!picked.length) return null;
+
+    // Group samples into chunks of ~0.5 s and interleave the tracks by time.
+    const chunks = [];
+    for (const p of picked) {
+      const tr = p.tr;
+      p.chunks = [];
+      let c = null;
+      for (let i = p.k; i <= p.j; i++) {
+        const time = tr.dts[i] / tr.ts;
+        if (!c || time - c.time >= 0.5 || tr.sdi[i] !== c.sdi) {
+          c = { p, time, i0: i, i1: i, sdi: tr.sdi[i], size: 0 };
+          p.chunks.push(c); chunks.push(c);
+        }
+        c.i1 = i; c.size += tr.size[i];
+      }
+    }
+    chunks.sort((x, y) => x.time - y.time);
+    let dataSize = 0;
+    for (const c of chunks) { c.rel = dataSize; dataSize += c.size; }
+
+    const ftyp = m.ftyp || new Uint8Array(0);
+    const big = dataSize > 0xF0000000;   // needs 64-bit offsets
+    const mdatHdr = big ? 16 : 8;
+    let moov = buildMoov(m, picked, big, 0);
+    moov = buildMoov(m, picked, big, ftyp.length + moov.length + mdatHdr);
+
+    const h = new Uint8Array(mdatHdr), hv = dvOf(h);
+    putType(h, 'mdat');
+    if (big) { hv.setUint32(0, 1); hv.setUint32(8, Math.floor((dataSize + 16) / 4294967296)); hv.setUint32(12, (dataSize + 16) >>> 0); }
+    else hv.setUint32(0, dataSize + 8);
+
+    const parts = [ftyp, moov, h];
+    for (const c of chunks) {
+      const tr = c.p.tr;
+      let s = -1, e = -1;
+      for (let i = c.i0; i <= c.i1; i++) {
+        const o = tr.off[i], z = tr.size[i];
+        if (o === e) e += z;
+        else { if (s >= 0) parts.push(file.slice(s, e)); s = o; e = o + z; }
+      }
+      if (s >= 0) parts.push(file.slice(s, e));
+    }
+    return new Blob(parts, { type });
+  }
+
+  function buildMoov(m, picked, big, dataStart) {
+    let movieDur = 0;
+    const traks = picked.map(p => {
+      const tr = p.tr, n = p.j - p.k + 1;
+      const runs = get => {   // run-length pairs [count, value, …]
+        const w = []; let cnt = 0, prev = 0;
+        for (let i = p.k; i <= p.j; i++) {
+          const v = get(i);
+          if (cnt && v === prev) cnt++; else { if (cnt) w.push(cnt, prev); prev = v; cnt = 1; }
+        }
+        w.push(cnt, prev);
+        return w;
+      };
+      let mediaDur = 0;
+      for (let i = p.k; i <= p.j; i++) mediaDur += tr.dur[i];
+      const tkDur = p.empty + p.seg;
+      movieDur = Math.max(movieDur, tkDur);
+
+      const tkhd = tr.tkhd.slice(); setDuration(tkhd, 36, 28, tkDur);
+      const mdhd = tr.mdhd.slice(); setDuration(mdhd, 32, 24, mediaDur);
+      const ed = [];
+      if (p.empty > 0) ed.push(p.empty, -1, 0x10000);
+      ed.push(p.seg, p.mediaTime, 0x10000);
+      const edts = mkBox('edts', [wordBox('elst', 0, [ed.length / 3, ...ed])]);
+
+      const stbl = [tr.stsd];
+      const stts = runs(i => tr.dur[i]);
+      stbl.push(wordBox('stts', 0, [stts.length / 2, ...stts]));
+      if (tr.cttsVer >= 0) { const c = runs(i => tr.cts[i]); stbl.push(wordBox('ctts', tr.cttsVer, [c.length / 2, ...c])); }
+      if (tr.sync) {
+        const s = [];
+        for (let i = p.k; i <= p.j; i++) if (tr.sync[i]) s.push(i - p.k + 1);
+        stbl.push(wordBox('stss', 0, [s.length, ...s]));
+      }
+      const stsc = [];
+      p.chunks.forEach((c, ci) => {
+        const spc = c.i1 - c.i0 + 1, L = stsc.length;
+        if (!L || stsc[L - 2] !== spc || stsc[L - 1] !== c.sdi) stsc.push(ci + 1, spc, c.sdi);
+      });
+      stbl.push(wordBox('stsc', 0, [stsc.length / 3, ...stsc]));
+      const sizes = new Array(n + 2);
+      sizes[0] = 0; sizes[1] = n;
+      for (let i = 0; i < n; i++) sizes[i + 2] = tr.size[p.k + i];
+      stbl.push(wordBox('stsz', 0, sizes));
+      const co = [p.chunks.length];
+      for (const c of p.chunks) {
+        const o = dataStart + c.rel;
+        if (big) co.push(Math.floor(o / 4294967296), o >>> 0); else co.push(o);
+      }
+      stbl.push(wordBox(big ? 'co64' : 'stco', 0, co));
+
+      const minf = mkBox('minf', [...tr.minfOther, mkBox('stbl', stbl)]);
+      return mkBox('trak', [tkhd, edts, mkBox('mdia', [mdhd, tr.hdlr, minf])]);
+    });
+    const mvhd = m.mvhd.slice(); setDuration(mvhd, 32, 24, movieDur);
+    return mkBox('moov', [mvhd, ...traks, ...m.extra]);
+  }
+  // ==== MP4 CUT END ====
+
+  async function saveMp4Clip(a, b) {
+    const ext = ((currentFile.name.match(MP4_EXT) || [])[1] || (isAudio ? 'm4a' : 'mp4')).toLowerCase();
+    const mime = { mov: 'video/quicktime', m4a: 'audio/mp4', '3gp': 'video/3gpp' }[ext] || 'video/mp4';
+    const name = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.' + ext;
+    if (!(await askWhereToSave(name, ext, mime, ext.toUpperCase() + (isAudio ? ' audio' : ' video')))) return;
+    beginSaving('cut', 'Saving ' + fmt(a) + '–' + fmt(b) + ' s…');
+    try {
+      const blob = buildMp4Cut(currentFile, mp4Index, a, b, mime);
+      if (!blob) throw new Error('nothing to save between A and B');
+      endSave(true, await downloadClip(blob, mime));
+    } catch (e) {
+      endSave(false, 'Could not save: ' + e.message);
+    }
+  }
+
   // Android app: pass the file to the app in pieces (base64), which writes it to the Download folder.
   async function saveViaAndroid(blob, name, type) {
     const id = window.AndroidSaver.begin(name, type.split(';')[0]);
@@ -598,7 +1021,10 @@
         let bin = '';
         for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
         if (!window.AndroidSaver.append(id, btoa(bin))) throw new Error('writing failed');
-        say('Writing file… ' + Math.min(100, Math.round((pos + CHUNK) / blob.size * 100)) + '%');
+        const f = Math.min(1, (pos + CHUNK) / blob.size);
+        setRing(f);
+        el.ringSub.textContent = 'Writing the file…';
+        say('Writing file… ' + Math.round(f * 100) + '%');
       }
       const where = window.AndroidSaver.finish(id);
       if (!where) throw new Error('finishing the file failed');
@@ -608,6 +1034,7 @@
       throw e;
     }
   }
+  // Writes the clip and returns a message saying where it went (throws if it fails).
   async function downloadClip(blob, type) {
     const size = (blob.size / 1048576).toFixed(1) + ' MB';
     if (saveHandle) {
@@ -615,28 +1042,22 @@
         const w = await saveHandle.createWritable();
         await w.write(blob);
         await w.close();
-        say('Saved "' + saveHandle.name + '" (' + size + ').');
-        return;
+        return 'Saved "' + saveHandle.name + '" (' + size + ').';
       } catch (e) {
         say('Could not write to that folder (' + e.message + '). Saving to Downloads instead.', true);
       }
     }
     const name = pendingName;
     if (window.AndroidSaver) {   // running inside the Android app
-      try {
-        const where = await saveViaAndroid(blob, name, type);
-        say('Saved "' + name + '" (' + size + ') to ' + where + '.');
-      } catch (e) {
-        say('Could not save: ' + e.message, true);
-      }
-      return;
+      const where = await saveViaAndroid(blob, name, type);
+      return 'Saved "' + name + '" (' + size + ') to ' + where + '.';
     }
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url; link.download = name;
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-    say('Saved "' + name + '" (' + size + ') to your Downloads folder.');
+    return 'Saved "' + name + '" (' + size + ') to your Downloads folder.';
   }
 
   function stopLoop(silent) {
@@ -728,7 +1149,9 @@
   el.go.addEventListener('click', startLoop);
   el.stop.addEventListener('click', () => stopLoop(false));
   el.save.addEventListener('click', startSave);
-  el.cancelSave.addEventListener('click', () => { if (mode === 'saving') finishSave(false); });
+  el.cancelSave.addEventListener('click', e => { e.stopPropagation(); if (mode === 'saving') finishSave(false); });
+  // Tap the ✓ / ✕ result to close it straight away.
+  el.overlay.addEventListener('click', () => { if (resultTimer) closeSaveOverlay(); });
   el.pause.addEventListener('click', () => {
     if (!loaded) return;
     if (mode !== 'idle') { stopLoop(true); say('Paused (tap Start loop to restart from A).'); }
