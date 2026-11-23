@@ -15,6 +15,18 @@ android/app/build/
 .idea/
 *.iml
 
+# Editor settings
+.vscode/
+
+# Personal / test media
+*.mp4
+*.m4v
+*.mov
+*.m4a
+*.mp3
+*.webm
+*.wav
+
 # Distribution binaries (published via GitHub Releases instead)
 *.apk
 *.aab

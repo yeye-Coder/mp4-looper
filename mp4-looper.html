@@ -39,11 +39,14 @@
   button.go { background: var(--accent); border-color: var(--accent); color: #002b2a; font-weight: 700; }
 
   .video-wrap { flex: 0 0 auto; width: 100%; height: min(48%, 460px); background: #000; position: relative; }
-  .video-wrap video { width: 100%; height: 100%; display: block; background: #000; object-fit: contain; }
+  /* Two players on top of each other: the visible one (.active) and a hidden helper behind it. */
+  .video-wrap video { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+    background: #000; object-fit: contain; z-index: 0; }
+  .video-wrap video.active { z-index: 1; }
   .video-wrap.drag { outline: 3px dashed var(--accent); outline-offset: -6px; }
   /* Audio files: smaller area, a music picture, and the player controls along the bottom. */
   .video-wrap.audio { height: min(32%, 300px); }
-  .video-wrap.audio video { position: absolute; left: 0; right: 0; bottom: 0; height: 54px; background: transparent; }
+  .video-wrap.audio video { top: auto; left: 0; right: 0; bottom: 0; height: 54px; background: transparent; }
   .audio-art { position: absolute; left: 0; right: 0; top: 0; bottom: 54px; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px; padding: 0 16px;
     background: radial-gradient(circle at 50% 40%, rgba(37,244,238,.18), transparent 65%); }
@@ -83,6 +86,16 @@
   .actions button { padding: 12px 4px; font-size: 14px; }
   .pill.saving { color: var(--accent2); border-color: var(--accent2); }
 
+  /* "Convert for instant looping?" question over the video */
+  .ask-overlay { position: absolute; inset: 0; z-index: 3; background: rgba(14,14,18,.9);
+    display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .ask-box { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px;
+    max-width: 360px; display: flex; flex-direction: column; gap: 10px; }
+  .ask-title { font-size: 16px; font-weight: 700; }
+  .ask-text { font-size: 13px; color: var(--muted); line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
+  .ask-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .ask-btns button { padding: 10px 16px; font-size: 14px; }
+
   /* Progress circle shown over the video while saving */
   .saving-overlay { position: absolute; inset: 0; z-index: 2; background: var(--bg);
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
@@ -108,6 +121,9 @@
   .saving-overlay .done-title { font-size: 17px; font-weight: 700; }
   .msg { font-size: 12px; color: var(--accent); min-height: 16px; margin-top: 6px; line-height: 1.4; }
   .msg.err { color: #fca5a5; }
+  /* Diagnostics log (test builds only) */
+  .diag { margin: 6px 0 0; padding: 6px; background: #000; border: 1px solid var(--line); border-radius: 8px;
+    color: #c8f7c5; font: 10px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
   /* Saved sentences */
   .clips { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
@@ -140,7 +156,18 @@
       <div>On a computer you can also drag the file here.</div>
     </div>
     <div class="audio-art" id="audioArt" hidden><div class="note">🎵</div><div class="t" id="audioName"></div></div>
-    <video id="video" controls playsinline preload="auto" hidden></video>
+    <video id="video" class="active" controls playsinline preload="auto" hidden></video>
+    <video id="video2" playsinline preload="auto" muted hidden></video>
+    <div class="ask-overlay" id="convertAsk" hidden>
+      <div class="ask-box">
+        <div class="ask-title">Make this video loop instantly?</div>
+        <div class="ask-text" id="convertText"></div>
+        <div class="ask-btns">
+          <button id="convertNo">Not now</button>
+          <button class="go" id="convertYes">Convert</button>
+        </div>
+      </div>
+    </div>
     <div class="saving-overlay" id="savingOverlay" hidden>
       <div class="ring" id="ring">
         <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="prog" id="ringProg" cx="60" cy="60" r="52"/></svg>
@@ -208,6 +235,7 @@
       <button id="saveBtn" title="Save the A–B section as a new file">💾 Save</button>
     </div>
     <div class="msg" id="msg"></div>
+    <pre class="diag" id="diag" hidden></pre>
 
     <div class="clips">
       <div class="clips-head">
@@ -225,7 +253,7 @@
   const $ = id => document.getElementById(id);
   const el = {
     open: $('openBtn'), file: $('fileInput'), name: $('fileName'),
-    wrap: $('videoWrap'), ph: $('placeholder'), video: $('video'), audioArt: $('audioArt'), audioName: $('audioName'),
+    wrap: $('videoWrap'), ph: $('placeholder'), audioArt: $('audioArt'), audioName: $('audioName'),
     cur: $('curTime'), dur: $('durTime'), pill: $('statePill'), loopCount: $('loopCount'), loopOf: $('loopOf'),
     bar: $('bar'), range: $('barRange'), head: $('barHead'),
     start: $('startInput'), end: $('endInput'), gap: $('gapInput'), gapVal: $('gapVal'), repeat: $('repeatInput'),
@@ -233,7 +261,8 @@
     go: $('startLoop'), pause: $('pauseBtn'), stop: $('stopBtn'), save: $('saveBtn'), msg: $('msg'),
     saveClip: $('saveClip'), clipList: $('clipList'),
     overlay: $('savingOverlay'), ring: $('ring'), ringProg: $('ringProg'), ringPct: $('ringPct'), ringTitle: $('ringTitle'),
-    ringSub: $('ringSub'), cancelSave: $('cancelSave')
+    ringSub: $('ringSub'), cancelSave: $('cancelSave'),
+    ask: $('convertAsk'), askText: $('convertText'), askYes: $('convertYes'), askNo: $('convertNo')
   };
   const RING_LEN = 2 * Math.PI * 52;
   el.ringProg.style.strokeDasharray = RING_LEN;
@@ -256,7 +285,11 @@
     el.ringProg.style.strokeDashoffset = RING_LEN * (1 - f);
     el.ringPct.textContent = Math.round(f * 100) + '%';
   }
-  const video = el.video;
+  // Two players with the same file. `video` is the one on screen; `standby` waits behind it and does
+  // the slow jumps (see "two players" below). They swap roles, so always use these two names.
+  const players = [$('video'), $('video2')];
+  let video = players[0], standby = players[1];
+  let userMuted = false, userVolume = 1;   // sound settings of the visible player
 
   // ---------- state ----------
   let loaded = false;
@@ -343,18 +376,32 @@
     mp4Index = null; mp4Indexing = null;
     if (isMp4Family(file)) {
       const job = mp4Indexing = indexMp4(file).catch(() => null).then(m => {
-        if (mp4Indexing === job) { mp4Index = m; mp4Indexing = null; }
+        if (mp4Indexing === job) {
+          mp4Index = m; mp4Indexing = null;
+          renderDiag();
+          offerConversion();
+        }
       });
     }
     el.wrap.classList.toggle('audio', isAudio);
     el.audioArt.hidden = !isAudio;
     el.audioName.textContent = file.name;
+    el.ask.hidden = true;
+    cancelPreview();
+    dualBroken = false;
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = URL.createObjectURL(file);
     loaded = false;
-    video.src = objectUrl;
-    video.playbackRate = rate;
+    for (const p of players) {
+      cancelPark(p);
+      p.parkedAt = null;
+      p.src = objectUrl;
+      p.playbackRate = rate;
+    }
+    video.muted = userMuted;
+    standby.muted = true;
     video.hidden = false;
+    standby.hidden = isAudio;   // audio files need one player only
     el.ph.hidden = true;
     el.name.innerHTML = '';
     const b = document.createElement('b'); b.textContent = file.name; el.name.appendChild(b);
@@ -366,17 +413,101 @@
     say('Loading ' + file.name + '…');
   }
 
-  video.addEventListener('loadedmetadata', () => {
-    loaded = true;
+  // Average seconds between key frames (full pictures) of an MP4's video, or 0 if unknown.
+  // Far apart = every jump makes the player decode a long stretch – slow on phones.
+  function keyGap() {
+    const tr = mp4Index && mp4Index.tracks.find(t => t.handler === 'vide');
+    if (!tr) return 0;
+    let keys = 0;
+    for (let i = 0; i < tr.n; i++) if (!tr.sync || tr.sync[i]) keys++;
+    const len = (tr.dts[tr.n - 1] + tr.dur[tr.n - 1]) / tr.ts;
+    return len / Math.max(1, keys);
+  }
+  function readyText() {
+    return 'Ready. Play, tap "Set = now" for A and B, then Start loop.';
+  }
+
+  // ---------- converting a video for instant looping ----------
+  // A video with full pictures (key frames) far apart makes every jump slow on phones. Offer once
+  // to make a copy with a key frame every second (30 fps H.264), save it, and continue with it.
+  const noConvertKey = () => 'mp4looper:noconvert:' + fileKey;
+  function offerConversion() {
+    if (!loaded || !mp4Index || mode !== 'idle' || !CAN_REENCODE || isAudio) return;
+    const g = keyGap();
+    if (g <= KEY_GAP_LIMIT || recall(noConvertKey())) return;
+    const vt = mp4Index.tracks.find(t => t.handler === 'vide');
+    let keys = 0;
+    for (let i = 0; i < vt.n; i++) if (!vt.sync || vt.sync[i]) keys++;
     const d = duration();
-    if (B() <= A() || B() > d) { el.start.value = '0.0'; el.end.value = fmt(Math.min(d, 5)); }
-    render();
-    say('Ready. Play, tap "Set = now" for A and B, then Start loop.');
-  });
-  video.addEventListener('error', () => { loaded = false; say('This file could not be played. MP4 (H.264) video or MP3 audio work best.', true); });
-  video.addEventListener('ratechange', () => { rate = video.playbackRate; updateSpeedUI(); });
-  video.addEventListener('timeupdate', render);
-  video.addEventListener('seeked', render);
+    el.askText.textContent = (keys <= 1
+      ? 'This video has only one full picture (key frame), at the start.'
+      : 'This video has a full picture (key frame) only every ' + g.toFixed(0) + ' s.') +
+      ' Jumping to A is then slow on phones.\n\nConvert it once to a copy that jumps instantly? It is saved as\n“' +
+      fileBaseName + ' (loop).mp4”.\nTakes up to about ' + Math.max(10, Math.ceil(d * 1.2)) + ' s on a phone, less on a computer.';
+    el.ask.hidden = false;
+  }
+  function declineConversion() {
+    el.ask.hidden = true;
+    store(noConvertKey(), true);
+    say('OK – kept the original. (Save still makes clips that start exactly at A.)');
+  }
+
+  async function convertForLooping() {
+    el.ask.hidden = true;
+    if (!mp4Index || !currentFile) return;
+    const src = currentFile, idx = mp4Index, oldClips = clips.slice();
+    const name = fileBaseName + ' (loop).mp4';
+    if (!(await askWhereToSave(name, 'mp4', 'video/mp4', 'MP4 video'))) return;
+    beginSaving('reencode', 'Converting for instant looping…\nPlease keep this window open.');
+    resumeState = null;   // a new file is opened afterwards
+    reencodeCancelled = false;
+    setRing(0);
+    try {
+      const vt = idx.tracks.find(t => t.handler === 'vide');
+      const ev = await reencodeWithRetry(src, vt, 0, duration() + 1);
+      ringSpin();
+      el.ringSub.textContent = 'Saving the copy…';
+      const blob = buildReencodedMp4(src, idx, vt, ev);
+      const where = await downloadClip(blob, 'video/mp4');
+      const file = new File([blob], name, { type: 'video/mp4' });
+      // Saved sentences carry over to the copy.
+      const newKey = 'mp4looper:' + name + ':' + file.size;
+      if (oldClips.length && !recall(newKey)) store(newKey, oldClips);
+      loadFile(file);
+      endSave(true, where);
+    } catch (e) {
+      if (reencodeCancelled) { endSave(null, 'Converting cancelled – kept the original.'); return; }
+      endSave(false, 'Could not convert: ' + e.message);
+    }
+  }
+
+  // Events of both players; most only matter for the one on screen.
+  for (const p of players) {
+    p.parkedAt = null; p.parkToken = 0; p.parking = false; p.parkCancel = null;
+    p.addEventListener('loadedmetadata', () => {
+      if (p !== video) { warmStandby(); return; }
+      loaded = true;
+      const d = duration();
+      if (B() <= A() || B() > d) { el.start.value = '0.0'; el.end.value = fmt(Math.min(d, 5)); }
+      render();
+      if (mode !== 'saving') say(readyText());
+      offerConversion();
+      diag('opened ' + (currentFile ? currentFile.name : '') + ' · ' + video.videoWidth + 'x' + video.videoHeight + ' · ' + d.toFixed(1) + 's');
+      warmStandby();
+    });
+    p.addEventListener('error', () => {
+      if (p !== video) { dualBroken = true; return; }   // helper player failed: carry on with one
+      loaded = false;
+      say('This file could not be played. MP4 (H.264) video or MP3 audio work best.', true);
+    });
+    p.addEventListener('ratechange', () => { if (p === video && !p.parking) { rate = p.playbackRate; updateSpeedUI(); } });
+    p.addEventListener('volumechange', () => { if (p === video && !p.parking) { userMuted = p.muted; userVolume = p.volume; } });
+    p.addEventListener('timeupdate', () => { if (p === video) render(); });
+    p.addEventListener('seeked', () => { if (p === video) render(); });
+    // Moved by someone else (e.g. the player's own controls): no longer parked on a known frame.
+    p.addEventListener('seeking', () => { if (!p.parking) p.parkedAt = null; });
+    p.addEventListener('play', () => { if (!p.parking) p.parkedAt = null; });
+  }
 
   // Precise loop: check the position on every animation frame (~60 times per second).
   function frame() {
@@ -408,12 +539,205 @@
     beginPass();
   }
 
-  function beginPass() {
+  // ---------- two players: jumps without visible delay ----------
+  // A video stores a full picture (key frame) only every few seconds. To show time t, the player
+  // decodes from the key frame before t up to t. Phones are slow at this and even show it (choppy,
+  // silent frames). So the hidden `standby` player does every jump: it goes to t behind the visible
+  // player and waits paused on the exact frame ("parked"). Then the two swap – instantly.
+  // While A–B plays, the standby parks at A, so each repeat starts at once.
+  const HAS_FRAME_CB = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+  const FRAME_EPS = 0.02;               // a frame within this of t counts as "at t"
+  let dualBroken = false;               // the phone couldn't run the helper player: use one player
+  let previewToken = 0, passToken = 0;
+  const near = (x, t) => x != null && Math.abs(x - t) < 0.001;
+  const isFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const dual = () => HAS_FRAME_CB && !isAudio && !dualBroken && !isFullscreen() && standby.readyState >= 1;
+  const clampT = t => Math.max(0, Math.min(t, (duration() || t + 1) - 0.05));
+
+  // ---------- diagnostics (test build: shows what the players do, to find phone problems) ----------
+  const DIAG = false;   // true = show the log under the buttons
+  const diagLines = [];
+  const diagEl = $('diag');
+  diagEl.hidden = !DIAG;
+  function diag(s) {
+    if (!DIAG) return;
+    diagLines.push((performance.now() / 1000).toFixed(2) + ' ' + s);
+    if (diagLines.length > 16) diagLines.shift();
+    renderDiag();
+  }
+  function keyframeInfo() {
+    const tr = mp4Index && mp4Index.tracks.find(t => t.handler === 'vide');
+    if (!tr) return mp4Indexing ? 'key frames: reading…' : 'key frames: unknown (not MP4)';
+    const keys = [];
+    for (let i = 0; i < tr.n; i++) if (!tr.sync || tr.sync[i]) keys.push((tr.dts[i] + tr.cts[i]) / tr.ts + tr.shift);
+    keys.sort((x, y) => x - y);
+    const a = A();
+    let before = keys[0];
+    for (const k of keys) if (k <= a + 1e-4) before = k;
+    return 'key frames: ' + keys.length + ' (every ~' + keyGap().toFixed(1) + 's); before A at ' + before.toFixed(2) +
+      ' → A is ' + (a - before).toFixed(2) + 's after it';
+  }
+  function renderDiag() {
+    if (!DIAG) return;
+    const why = !HAS_FRAME_CB ? 'no frame callback' : isAudio ? 'audio file' : dualBroken ? 'HELPER FAILED'
+      : isFullscreen() ? 'full screen' : standby.readyState < 1 ? 'helper not loaded' : '';
+    const chrome = (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || '?';
+    diagEl.textContent = 'v1.6-diag · WebView ' + chrome + ' · players: ' + (why ? '1 (' + why + ')' : '2') +
+      ' · front=' + video.id + '\n' + keyframeInfo() + '\n' + diagLines.join('\n');
+  }
+
+  // Brings player p, paused and silent, onto the frame at time t. Resolves true when that frame
+  // is on show, false if cancelled or failed. forward = play on from where it is (no jump).
+  function park(p, t, forward) {
+    if (p.parkCancel) p.parkCancel();
+    const token = ++p.parkToken;
+    p.parking = true; p.parkedAt = null; p.parkTarget = t;
+    p.muted = true;
+    const t0 = performance.now();
+    let frames = 0, seekMs = -1, firstMt = null;
+    diag('park ' + p.id + ' → ' + t.toFixed(2) + (forward ? ' (play on)' : ' (jump)') + ' from ' + p.currentTime.toFixed(2));
+    const promise = new Promise(resolve => {
+      let seekDone = !!forward;
+      const onSeeked = () => { seekDone = true; seekMs = Math.round(performance.now() - t0); };
+      const cleanup = () => {
+        clearTimeout(timer);
+        p.removeEventListener('seeked', onSeeked);
+        p.removeEventListener('ended', onEnded);
+        p.parkCancel = null;
+      };
+      // broken: the player showed no frames at all – this device can't use the helper player.
+      const finish = (ok, broken) => {
+        if (token !== p.parkToken) return;
+        cleanup();
+        p.pause();
+        p.parking = false;
+        if (p === video) p.muted = userMuted;
+        if (ok) p.parkedAt = t;
+        if (broken) dualBroken = true;
+        diag('  ' + p.id + (ok ? ' READY' : broken ? ' FAILED (no frames)' : ' gave up (too slow)') + ' after ' + Math.round(performance.now() - t0) + 'ms' +
+          ' · frames=' + frames + ' · seeked@' + seekMs + 'ms · 1st frame ' + (firstMt == null ? '-' : firstMt.toFixed(2)));
+        resolve(ok);
+      };
+      const onEnded = () => finish(true);
+      const check = (now, meta) => {
+        if (token !== p.parkToken) return;
+        frames++;
+        if (firstMt == null && seekDone) firstMt = meta.mediaTime;
+        if (seekDone && meta.mediaTime >= t - FRAME_EPS && meta.mediaTime < t + 1) finish(true);
+        else p.requestVideoFrameCallback(check);
+      };
+      // A slow phone may need many seconds when key frames are far apart – that's fine.
+      // Only if no frame at all comes is the helper player not working here.
+      let timer = setTimeout(() => {
+        if (frames === 0) finish(false, true);
+        else timer = setTimeout(() => finish(false, false), 40000);
+      }, 8000);
+      p.parkCancel = () => { cleanup(); diag('  ' + p.id + ' cancelled after ' + Math.round(performance.now() - t0) + 'ms'); resolve(false); };
+      p.addEventListener('seeked', onSeeked);
+      p.addEventListener('ended', onEnded);
+      p.requestVideoFrameCallback(check);
+      if (!forward) p.currentTime = t;
+      p.play().catch(() => { if (token === p.parkToken && p.parking) { cleanup(); p.parking = false; resolve(false); } });
+    });
+    p.parkPromise = promise;
+    return promise;
+  }
+
+  // Stops a parking in progress (the player stays paused where it is).
+  function cancelPark(p) {
+    p.parkToken++;
+    if (p.parkCancel) {
+      p.parkCancel();
+      p.pause();
+      p.parking = false;
+      p.muted = p === video ? userMuted : true;
+    }
+  }
+
+  function cancelPreview() { previewToken++; }
+
+  // The standby comes to the front (its frame is already on show); the other goes behind.
+  function swapPlayers() {
+    const back = video;
+    video = standby; standby = back;
+    cancelPark(standby);
+    video.classList.add('active'); standby.classList.remove('active');
+    video.controls = mode !== 'saving'; standby.controls = false;
+    video.muted = userMuted; video.volume = userVolume; video.playbackRate = rate;
+    standby.pause(); standby.muted = true;
+    diag('swap: front is now ' + video.id + ' at ' + video.currentTime.toFixed(2));
+    render();
+  }
+
+  // Keep the standby parked at A, ready for Start loop / the next repeat.
+  function warmStandby() {
+    if (!loaded || !dual() || mode === 'saving') return;
+    const a = clampT(A());
+    if (near(standby.parkedAt, a) || (standby.parking && near(standby.parkTarget, a))) return;
+    park(standby, a);
+  }
+
+  // Shows time t without a visible jump: a little forward = just play on to it; otherwise the
+  // standby jumps there behind the current (frozen) picture, then they swap. keepPlaying: for the bar.
+  async function showAt(t, keepPlaying) {
+    const token = ++previewToken;
+    t = clampT(t);
+    const wasPlaying = keepPlaying && !video.paused;
+    diag('show ' + t.toFixed(2) + ' (front at ' + video.currentTime.toFixed(2) + ')');
+    if (!dual()) { diag('  ONE player → jump front'); if (!keepPlaying) video.pause(); video.currentTime = t; return; }
+    const cur = video.currentTime;
+    let ok;
+    if (!keepPlaying && t >= cur - 0.001 && t - cur <= 1.0 && video.readyState >= 2) {
+      if (t - cur <= FRAME_EPS && !video.parking) { video.pause(); ok = true; }   // already showing it
+      else ok = await park(video, t, true);
+    } else {
+      if (!keepPlaying) { cancelPark(video); video.pause(); }
+      ok = await park(standby, t);
+      if (token !== previewToken || mode !== 'idle') return;
+      if (ok) { swapPlayers(); if (wasPlaying) video.play().catch(() => {}); }
+    }
+    if (token !== previewToken || mode !== 'idle') return;
+    if (!ok) { video.currentTime = t; if (wasPlaying) video.play().catch(() => {}); }
+    render();
+    warmStandby();
+  }
+
+  async function beginPass() {
+    cancelPreview();
+    const token = ++passToken;
+    const a = clampT(A());
     setMode('playing');
-    awaitingSeek = true;
+    awaitingSeek = true;   // don't treat the old position (at B) as the end again
     clearTimeout(awaitingSeekTimeout);
+    if (dual()) {
+      if (near(video.parkedAt, a)) {
+        // The picture on screen is already at A (e.g. A was just adjusted): just play.
+        diag('pass: front already at A → play');
+      } else if (near(standby.parkedAt, a)) {
+        diag('pass: helper ready at A → swap');
+        swapPlayers();   // instant
+      } else {
+        diag('pass: helper NOT ready → wait (picture frozen)');
+        // Not ready yet: keep the current picture still while the standby gets to A.
+        cancelPark(video);
+        video.pause();
+        const ok = await (standby.parking && near(standby.parkTarget, a) ? standby.parkPromise : park(standby, a));
+        if (token !== passToken || mode !== 'playing') return;
+        if (ok) swapPlayers();
+      }
+      if (near(video.parkedAt, a)) {
+        video.parkedAt = null;
+        awaitingSeek = false;
+        video.playbackRate = rate;
+        video.play().catch(e => { if (e.name !== 'AbortError') say('Could not play: ' + e.message, true); });
+        warmStandby();   // the other player goes back to A for the next repeat
+        return;
+      }
+    }
+    // One player only (audio, full screen, or the helper didn't work): jump and play.
+    diag('pass: ONE player → jump front to A');
     awaitingSeekTimeout = setTimeout(() => { awaitingSeek = false; }, 1500);
-    video.currentTime = A();
+    video.currentTime = a;
     // AbortError = stopped/paused before playback began (e.g. Save was pressed) – not a problem.
     video.play().catch(e => { if (e.name !== 'AbortError') say('Could not play: ' + e.message, true); });
   }
@@ -559,8 +883,11 @@
     ringSpin();
     el.ringTitle.hidden = true;
     el.ringSub.textContent = text;
-    el.cancelSave.hidden = kind !== 'record';   // a direct cut takes a moment only
+    el.cancelSave.hidden = kind === 'cut';   // a direct cut takes a moment only
     setMode('saving');
+    // Both players rest while saving (the video decoder may be needed for the clip).
+    cancelPark(standby);
+    standby.pause();
     say('Saving…');
   }
 
@@ -591,23 +918,28 @@
     el.cancelSave.hidden = false;
     setMode('idle');
     const r = resumeState; resumeState = null;
-    if (!r || !loaded) return;
+    if (!r || !loaded) { warmStandby(); return; }
     // Continue exactly where it was before Save.
+    // (A direct cut doesn't move the video, so usually it can just play on – no jump needed.)
+    const moved = Math.abs(video.currentTime - r.time) > 0.05;
     if (r.loop) {
       loops = r.loops; updateLoopLabel();
-      if (r.gap || r.time < A() || r.time >= B() - 0.05) { beginPass(); return; }
+      if (r.gap || moved || r.time < A() || r.time >= B() - 0.05) { beginPass(); return; }
       setMode('playing');
       awaitingSeek = false;
-      video.currentTime = r.time;
       video.play().catch(() => {});
+      warmStandby();
+    } else if (moved) {
+      showAt(r.time, false).then(() => { if (r.playing && mode === 'idle') video.play().catch(() => {}); });
     } else {
-      video.currentTime = r.time;
       if (r.playing) video.play().catch(() => {});
+      warmStandby();
     }
   }
 
   function finishSave(keep) {
     if (resultTimer) { closeSaveOverlay(); return; }   // result showing: tap to skip the wait
+    if (saveKind === 'reencode' && !saveEnding && !keep) { reencodeCancelled = true; return; }
     if (saveKind !== 'record' || saveEnding) return;   // a direct cut finishes by itself
     saveKeep = keep;
     video.pause();
@@ -995,16 +1327,334 @@
   }
   // ==== MP4 CUT END ====
 
+  // ---------- re-encoding save: a clip that starts exactly at A, with a key frame every second ----------
+  // A plain cut has to start at the key frame before A (players then decode from there and hide it –
+  // on phones that's a silent, slow run-up). When key frames are far apart, the video part of A–B is
+  // decoded and encoded again (browser's built-in WebCodecs, usually hardware), with a full picture
+  // every second. The sound is copied unchanged.
+  const CAN_REENCODE = typeof VideoDecoder === 'function' && typeof VideoEncoder === 'function';
+  const KEY_GAP_LIMIT = 3;   // seconds between key frames above which a clip is re-encoded
+
+  function videoKeyTimes(vt) {
+    const keys = [];
+    for (let i = 0; i < vt.n; i++) if (!vt.sync || vt.sync[i]) keys.push((vt.dts[i] + vt.cts[i]) / vt.ts + vt.shift);
+    return keys.sort((x, y) => x - y);
+  }
+  // True when a plain cut of A..B would hide a long run-up or contain long key-frame gaps.
+  function needsReencode(m, a, b) {
+    const vt = m && m.tracks.find(t => t.handler === 'vide');
+    if (!vt || !vt.sync) return false;
+    const keys = videoKeyTimes(vt);
+    let prev = keys[0];
+    for (const k of keys) if (k <= a + 1e-4) prev = k;
+    if (a - prev > 1.05) return true;   // up to 1 s run-up is quick everywhere
+    for (const k of keys) {
+      if (k <= a + 1e-4 || k >= b) continue;
+      if (k - prev > KEY_GAP_LIMIT) return true;
+      prev = k;
+    }
+    return b - prev > KEY_GAP_LIMIT;
+  }
+
+  // WebCodecs decoder setup from the track's sample description (H.264 or H.265 only).
+  function decoderConfigOf(vt) {
+    const u = vt.stsd;
+    if (u.length < 24 + 78) return null;
+    const entryType = fourcc(u, 20), entryEnd = 16 + dvOf(u).getUint32(16);
+    const width = dvOf(u).getUint16(16 + 32), height = dvOf(u).getUint16(16 + 34);
+    const boxes = kids(u, { p: 16 + 8 + 78, e: entryEnd });
+    const hex = (v, n = 2) => v.toString(16).toUpperCase().padStart(n, '0');
+    const payload = b => u.slice(b.p, b.e);
+    const avcC = boxes.find(b => b.type === 'avcC'), hvcC = boxes.find(b => b.type === 'hvcC');
+    if (/^avc[13]$/.test(entryType) && avcC) {
+      const d = payload(avcC);
+      return { codec: entryType + '.' + hex(d[1]) + hex(d[2]) + hex(d[3]), description: d, codedWidth: width, codedHeight: height, width, height };
+    }
+    if (/^(hvc1|hev1)$/.test(entryType) && hvcC) {
+      const d = payload(hvcC), dv = dvOf(d);
+      const space = d[1] >> 6, tier = (d[1] >> 5) & 1, profile = d[1] & 31;
+      let compat = dv.getUint32(2), rev = 0;
+      for (let i = 0; i < 32; i++) { rev = (rev << 1) | (compat & 1); compat >>>= 1; }
+      const cons = Array.from(d.subarray(6, 12));
+      while (cons.length && cons[cons.length - 1] === 0) cons.pop();
+      const codec = entryType + '.' + ['', 'A', 'B', 'C'][space] + profile + '.' + (rev >>> 0).toString(16).toUpperCase() +
+        '.' + (tier ? 'H' : 'L') + d[12] + cons.map(c => '.' + hex(c)).join('');
+      return { codec, description: d, codedWidth: width, codedHeight: height, width, height };
+    }
+    return null;
+  }
+
+  // H.264 encoder setup that this browser supports for w×h at fps (High, then Main, then Baseline).
+  async function encoderConfigFor(w, h, fps, bitrate) {
+    const mbs = Math.ceil(w / 16) * Math.ceil(h / 16), mbps = mbs * fps;
+    const levels = [[0x1F, 3600, 108000], [0x20, 5120, 216000], [0x28, 8192, 245760], [0x2A, 8704, 522240],
+      [0x32, 22080, 589824], [0x33, 36864, 983040], [0x34, 36864, 2073600]];
+    const lv = (levels.find(([, f, r]) => mbs <= f && mbps <= r) || levels[levels.length - 1])[0];
+    for (const prof of ['6400', '4D40', '42E0']) {
+      const cfg = { codec: 'avc1.' + prof + lv.toString(16).toUpperCase(), width: w, height: h, bitrate, framerate: fps,
+        avc: { format: 'avc' }, bitrateMode: 'variable', latencyMode: 'quality' };
+      try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch {}
+    }
+    return null;
+  }
+
+  // Reads small pieces of a big file through a 4 MB window (samples are mostly in order).
+  function blockReader(file) {
+    let base = -1, buf = null;
+    return async (off, size) => {
+      if (buf && off >= base && off + size <= base + buf.length) return buf.subarray(off - base, off - base + size);
+      base = off;
+      buf = new Uint8Array(await file.slice(off, off + Math.max(4 << 20, size)).arrayBuffer());
+      return buf.subarray(0, size);
+    };
+  }
+
+  // Decodes the video from the key frame before A, encodes the frames A..B again. Returns the
+  // encoded samples. progress(0..1); cancelled() → stop.
+  async function reencodeVideo(file, vt, a, b, progress, cancelled) {
+    const dec = decoderConfigOf(vt);
+    if (!dec) throw new Error('this video codec can\'t be re-encoded here');
+    if (!(await VideoDecoder.isConfigSupported(dec)).supported) throw new Error('can\'t decode ' + dec.codec + ' here');
+    const t = i => (vt.dts[i] + vt.cts[i]) / vt.ts + vt.shift;
+    let k = 0;
+    for (let i = 0; i < vt.n; i++) if ((!vt.sync || vt.sync[i]) && t(i) <= a + 1e-4) k = i;
+    let j = k;
+    for (let i = k; i < vt.n; i++) { if (t(i) < b - 1e-4) j = i; else if (vt.dts[i] / vt.ts + vt.shift > b + 5) break; }
+    // Up to 30 frames per second: smaller, and quickest to jump on phones.
+    const srcFps = Math.min(120, Math.max(1, Math.round(vt.ts / (vt.dur[k] || vt.ts / 30))));
+    const fps = Math.min(30, srcFps);
+    let bytes = 0;
+    for (let i = k; i <= j; i++) bytes += vt.size[i];
+    const srcBps = bytes * 8 / Math.max(0.5, (vt.dts[j] - vt.dts[k] + vt.dur[j]) / vt.ts);
+    const bitrate = Math.round(Math.min(16e6, Math.max(srcBps * 2.5, dec.width * dec.height * fps * 0.014, 1e6)));
+    const enc = await encoderConfigFor(dec.width, dec.height, fps, bitrate);
+    if (!enc) throw new Error('this device can\'t encode ' + dec.width + '×' + dec.height + ' video');
+
+    const samples = [];
+    let description = null, failure = null, nEnc = 0;
+    const gop = fps;   // key frame every second
+    const aUs = a * 1e6, bUs = b * 1e6, halfFrame = 5e5 / srcFps, outUs = 1e6 / fps;
+    let nextUs = aUs - halfFrame;   // time of the next frame to keep (drops frames above 30 fps)
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        samples.push({ ts: chunk.timestamp, key: chunk.type === 'key', data });
+        if (!description && meta && meta.decoderConfig && meta.decoderConfig.description) {
+          const d = meta.decoderConfig.description;
+          description = new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d.slice(0));
+        }
+      },
+      error: e => { failure = failure || e; },
+    });
+    encoder.configure(enc);
+    const decoder = new VideoDecoder({
+      output: frame => {
+        const ts = frame.timestamp;
+        if (ts >= aUs - halfFrame && ts < bUs - 1 && ts >= nextUs && !failure) {
+          encoder.encode(frame, { keyFrame: nEnc % gop === 0 });
+          nEnc++;
+          nextUs = Math.max(nextUs + outUs, ts + outUs / 2);
+        }
+        frame.close();
+      },
+      error: e => { failure = failure || e; },
+    });
+    decoder.configure(dec);
+    const read = blockReader(file);
+    const pause = () => new Promise(r => setTimeout(r, 2));
+    try {
+      for (let i = k; i <= j; i++) {
+        if (cancelled()) throw new Error('cancelled');
+        if (failure) throw failure;
+        while (decoder.decodeQueueSize > 4 || encoder.encodeQueueSize > 4) { await pause(); if (failure) throw failure; }
+        const data = await read(vt.off[i], vt.size[i]);
+        decoder.decode(new EncodedVideoChunk({
+          type: (!vt.sync || vt.sync[i]) ? 'key' : 'delta',
+          timestamp: Math.round(t(i) * 1e6),
+          duration: Math.round(vt.dur[i] / vt.ts * 1e6),
+          data,
+        }));
+        if ((i & 7) === 0) progress((i - k) / (j - k + 1));
+      }
+      await decoder.flush();
+      await encoder.flush();
+      if (failure) throw failure;
+    } finally {
+      try { decoder.close(); } catch {}
+      try { encoder.close(); } catch {}
+    }
+    if (!samples.length || !description) throw new Error('the encoder produced no video');
+    return { samples, description, width: dec.width, height: dec.height, frameUs: outUs };
+  }
+
+  // Re-encodes; if the hardware decoder was busy for a moment, tries once more.
+  async function reencodeWithRetry(file, vt, a, b) {
+    const run = () => reencodeVideo(file, vt, a, b,
+      f => { setRing(f * 0.97); say('Working… ' + Math.round(f * 100) + '%'); }, () => reencodeCancelled);
+    try { return await run(); }
+    catch (e) {
+      if (reencodeCancelled || !/decod/i.test(e.message)) throw e;
+      diag('re-encode: ' + e.message + ' – retrying');
+      await new Promise(r => setTimeout(r, 500));
+      setRing(0);
+      return run();
+    }
+  }
+
+  // Writes the new MP4: re-encoded video + the original sound samples for the same time span.
+  function buildReencodedMp4(file, m, vt, ev) {
+    const VTS = 90000, MTS = m.movieTs;
+    const s = ev.samples, n = s.length, t0 = s.reduce((mn, x) => Math.min(mn, x.ts), Infinity);
+    const pts = s.map(x => Math.round((x.ts - t0) * VTS / 1e6));
+    const dts = pts.slice().sort((x, y) => x - y);
+    const durs = dts.map((d, i) => i + 1 < n ? dts[i + 1] - d : Math.round(ev.frameUs * VTS / 1e6));
+    const ctts = pts.map((p, i) => p - dts[i]);
+    const vStart = t0 / 1e6, vLen = (dts[n - 1] + durs[n - 1]) / VTS, vEnd = vStart + vLen;
+
+    // Group samples into ~0.5 s chunks. parts(i) gives the bytes of sample i (array or Blob).
+    const chunkUp = (count, timeOf, sizeOf) => {
+      const out = []; let c = null;
+      for (let i = 0; i < count; i++) {
+        const time = timeOf(i);
+        if (!c || time - c.time >= 0.5) { c = { time, i0: i, i1: i, size: 0 }; out.push(c); }
+        c.i1 = i; c.size += sizeOf(i);
+      }
+      return out;
+    };
+    const tracks = [];
+    // Video
+    {
+      const hdr = new Uint8Array(8); dvOf(hdr).setUint32(4, 1);
+      const head = new Uint8Array(78), hv = dvOf(head);
+      hv.setUint16(6, 1); hv.setUint16(24, ev.width); hv.setUint16(26, ev.height);
+      hv.setUint32(28, 0x00480000); hv.setUint32(32, 0x00480000); hv.setUint16(40, 1);
+      hv.setUint16(74, 0x0018); hv.setInt16(76, -1);
+      const stsd = mkBox('stsd', [hdr, mkBox('avc1', [head, mkBox('avcC', [ev.description])])]);
+      const syncs = []; s.forEach((x, i) => { if (x.key) syncs.push(i + 1); });
+      tracks.push({
+        tkhd: vt.tkhd, hdlr: vt.hdlr, minfOther: vt.minfOther, stsd, ts: VTS,
+        mdhd: wordBox('mdhd', 0, [0, 0, VTS, dts[n - 1] + durs[n - 1], 0x55C40000]),
+        n, sizes: s.map(x => x.data.length), durs, ctts: ctts.some(c => c) ? ctts : null, cttsVer: 1,
+        syncs: syncs.length < n ? syncs : null,
+        chunks: chunkUp(n, i => vStart + dts[i] / VTS, i => s[i].data.length),
+        bytes: i => s[i].data,
+        empty: 0, seg: Math.round(vLen * MTS), mediaTime: 0,
+      });
+    }
+    // Sound (original samples, unchanged)
+    for (const tr of m.tracks) {
+      if (tr.handler !== 'soun') continue;
+      const t = i => (tr.dts[i] + tr.cts[i]) / tr.ts + tr.shift;
+      let k = -1, j = -1;
+      for (let i = 0; i < tr.n; i++) {
+        if (t(i) <= vStart + 1e-4) k = i;
+        if (t(i) < vEnd - 1e-4) j = i; else if (tr.dts[i] / tr.ts + tr.shift > vEnd + 5) break;
+      }
+      if (k < 0) k = 0;
+      if (j < k) continue;
+      const first = t(k), last = t(j) + tr.dur[j] / tr.ts;
+      const begin = Math.max(vStart, first), end = Math.min(vEnd, last);
+      if (end <= begin) continue;
+      const cnt = j - k + 1;
+      const mdhd = tr.mdhd.slice();
+      let mediaDur = 0; for (let i = k; i <= j; i++) mediaDur += tr.dur[i];
+      setDuration(mdhd, 32, 24, mediaDur);
+      const ct = []; for (let i = k; i <= j; i++) ct.push(tr.cts[i]);
+      tracks.push({
+        tkhd: tr.tkhd, hdlr: tr.hdlr, minfOther: tr.minfOther, stsd: tr.stsd, ts: tr.ts, mdhd,
+        n: cnt, sizes: Array.from(tr.size.subarray(k, j + 1)), durs: Array.from(tr.dur.subarray(k, j + 1)),
+        ctts: tr.cttsVer >= 0 ? ct : null, cttsVer: Math.max(0, tr.cttsVer), syncs: null,
+        chunks: chunkUp(cnt, i => tr.dts[k + i] / tr.ts + tr.shift, i => tr.size[k + i]),
+        bytes: i => file.slice(tr.off[k + i], tr.off[k + i] + tr.size[k + i]),
+        empty: Math.round((begin - vStart) * MTS), seg: Math.round((end - begin) * MTS),
+        mediaTime: Math.max(0, Math.round((begin - tr.shift) * tr.ts) - tr.dts[k]),
+      });
+      break;   // one sound track is enough
+    }
+
+    // Interleave all chunks by time and give each its place in the data.
+    const all = [];
+    tracks.forEach(T => T.chunks.forEach(c => { c.T = T; all.push(c); }));
+    all.sort((x, y) => x.time - y.time);
+    let dataSize = 0;
+    for (const c of all) { c.rel = dataSize; dataSize += c.size; }
+    const big = dataSize > 0xF0000000;
+
+    const buildMoovNew = dataStart => {
+      let movieDur = 0;
+      const traks = tracks.map(T => {
+        const runs = arr => { const w = []; let cnt = 0, prev = 0;
+          for (const v of arr) { if (cnt && v === prev) cnt++; else { if (cnt) w.push(cnt, prev); prev = v; cnt = 1; } }
+          w.push(cnt, prev); return w; };
+        const tkDur = T.empty + T.seg;
+        movieDur = Math.max(movieDur, tkDur);
+        const tkhd = T.tkhd.slice(); setDuration(tkhd, 36, 28, tkDur);
+        const ed = [];
+        if (T.empty > 0) ed.push(T.empty, -1, 0x10000);
+        ed.push(T.seg, T.mediaTime, 0x10000);
+        const stbl = [T.stsd];
+        const st = runs(T.durs); stbl.push(wordBox('stts', 0, [st.length / 2, ...st]));
+        if (T.ctts) { const c = runs(T.ctts); stbl.push(wordBox('ctts', T.cttsVer, [c.length / 2, ...c])); }
+        if (T.syncs) stbl.push(wordBox('stss', 0, [T.syncs.length, ...T.syncs]));
+        const sc = [];
+        T.chunks.forEach((c, ci) => { const spc = c.i1 - c.i0 + 1, L = sc.length; if (!L || sc[L - 2] !== spc) sc.push(ci + 1, spc, 1); });
+        stbl.push(wordBox('stsc', 0, [sc.length / 3, ...sc]));
+        stbl.push(wordBox('stsz', 0, [0, T.n, ...T.sizes]));
+        const co = [T.chunks.length];
+        for (const c of T.chunks) { const o = dataStart + c.rel; if (big) co.push(Math.floor(o / 4294967296), o >>> 0); else co.push(o); }
+        stbl.push(wordBox(big ? 'co64' : 'stco', 0, co));
+        const minf = mkBox('minf', [...T.minfOther, mkBox('stbl', stbl)]);
+        return mkBox('trak', [tkhd, mkBox('edts', [wordBox('elst', 0, [ed.length / 3, ...ed])]), mkBox('mdia', [T.mdhd, T.hdlr, minf])]);
+      });
+      const mvhd = m.mvhd.slice(); setDuration(mvhd, 32, 24, movieDur);
+      return mkBox('moov', [mvhd, ...traks]);
+    };
+    const ascii = str => Uint8Array.from(str, ch => ch.charCodeAt(0));
+    const ftyp = mkBox('ftyp', [ascii('isom'), Uint8Array.of(0, 0, 2, 0), ascii('isomiso2avc1mp41')]);
+    const mdatHdr = big ? 16 : 8;
+    let moov = buildMoovNew(0);
+    moov = buildMoovNew(ftyp.length + moov.length + mdatHdr);
+    const h = new Uint8Array(mdatHdr), hv = dvOf(h);
+    putType(h, 'mdat');
+    if (big) { hv.setUint32(0, 1); hv.setUint32(8, Math.floor((dataSize + 16) / 4294967296)); hv.setUint32(12, (dataSize + 16) >>> 0); }
+    else hv.setUint32(0, dataSize + 8);
+    const parts = [ftyp, moov, h];
+    for (const c of all) for (let i = c.i0; i <= c.i1; i++) parts.push(c.T.bytes(i));
+    return new Blob(parts, { type: 'video/mp4' });
+  }
+
+  let reencodeCancelled = false;
+
   async function saveMp4Clip(a, b) {
-    const ext = ((currentFile.name.match(MP4_EXT) || [])[1] || (isAudio ? 'm4a' : 'mp4')).toLowerCase();
+    const reencode = CAN_REENCODE && needsReencode(mp4Index, a, b);
+    const ext = reencode ? 'mp4' : ((currentFile.name.match(MP4_EXT) || [])[1] || (isAudio ? 'm4a' : 'mp4')).toLowerCase();
     const mime = { mov: 'video/quicktime', m4a: 'audio/mp4', '3gp': 'video/3gpp' }[ext] || 'video/mp4';
     const name = fileBaseName + '_' + fmt(a) + 's-' + fmt(b) + 's.' + ext;
     if (!(await askWhereToSave(name, ext, mime, ext.toUpperCase() + (isAudio ? ' audio' : ' video')))) return;
-    beginSaving('cut', 'Saving ' + fmt(a) + '–' + fmt(b) + ' s…');
+    beginSaving(reencode ? 'reencode' : 'cut', 'Saving ' + fmt(a) + '–' + fmt(b) + ' s…');
     try {
-      const blob = buildMp4Cut(currentFile, mp4Index, a, b, mime);
+      let blob = null, note = '';
+      if (reencode) {
+        reencodeCancelled = false;
+        setRing(0);
+        el.ringSub.textContent = 'Making a clip that starts exactly at A…\nPlease keep this window open.';
+        const vt = mp4Index.tracks.find(t => t.handler === 'vide');
+        try {
+          const ev = await reencodeWithRetry(currentFile, vt, a, b);
+          setRing(1);
+          blob = buildReencodedMp4(currentFile, mp4Index, vt, ev);
+        } catch (e) {
+          if (reencodeCancelled) { endSave(null, 'Saving cancelled.'); return; }
+          // Couldn't re-encode on this device: fall back to the exact copy.
+          note = ' (exact copy – re-encoding failed: ' + e.message + ')';
+          diag('re-encode failed: ' + e.message);
+        }
+      }
+      if (!blob) blob = buildMp4Cut(currentFile, mp4Index, a, b, mime);
       if (!blob) throw new Error('nothing to save between A and B');
-      endSave(true, await downloadClip(blob, mime));
+      ringSpin();
+      endSave(true, (await downloadClip(blob, mime)) + note);
     } catch (e) {
       endSave(false, 'Could not save: ' + e.message);
     }
@@ -1062,11 +1712,14 @@
 
   function stopLoop(silent) {
     if (mode === 'saving') { finishSave(false); return; }
+    cancelPreview();
+    passToken++;
     clearTimers();
     awaitingSeek = false;
     if (mode !== 'idle') video.pause();
     setMode('idle');
     if (!silent) say('Stopped.');
+    warmStandby();
   }
 
   // ---------- saved sentences ----------
@@ -1150,15 +1803,19 @@
   el.stop.addEventListener('click', () => stopLoop(false));
   el.save.addEventListener('click', startSave);
   el.cancelSave.addEventListener('click', e => { e.stopPropagation(); if (mode === 'saving') finishSave(false); });
+  el.askYes.addEventListener('click', convertForLooping);
+  el.askNo.addEventListener('click', declineConversion);
   // Tap the ✓ / ✕ result to close it straight away.
   el.overlay.addEventListener('click', () => { if (resultTimer) closeSaveOverlay(); });
   el.pause.addEventListener('click', () => {
     if (!loaded) return;
-    if (mode !== 'idle') { stopLoop(true); say('Paused (tap Start loop to restart from A).'); }
-    else if (video.paused) video.play(); else video.pause();
+    if (mode !== 'idle') { stopLoop(true); say('Paused (tap Start loop to restart from A).'); return; }
+    cancelPreview();
+    cancelPark(video);
+    if (video.paused) video.play(); else video.pause();
   });
 
-  el.startNow.addEventListener('click', () => { el.start.value = fmt(video.currentTime); activeClip = -1; render(); });
+  el.startNow.addEventListener('click', () => { el.start.value = fmt(video.currentTime); activeClip = -1; render(); warmStandby(); });
   el.endNow.addEventListener('click', () => { el.end.value = fmt(video.currentTime); activeClip = -1; render(); });
 
   document.querySelectorAll('[data-nudge]').forEach(btn => btn.addEventListener('click', () => {
@@ -1173,15 +1830,14 @@
   function previewAt(t) {
     render();
     if (mode !== 'idle' || !loaded || !Number.isFinite(t)) return;
-    video.pause();
-    video.currentTime = Math.max(0, Math.min(t, duration()));
+    showAt(t, false);
   }
 
   el.speedSeg.addEventListener('click', e => {
     const b = e.target.closest('button[data-rate]');
     if (!b) return;
     rate = parseFloat(b.dataset.rate);
-    video.playbackRate = rate;
+    for (const p of players) p.playbackRate = rate;
     updateSpeedUI();
   });
 
@@ -1192,7 +1848,8 @@
   el.bar.addEventListener('click', e => {
     if (!loaded) return;
     const r = el.bar.getBoundingClientRect();
-    video.currentTime = ((e.clientX - r.left) / r.width) * duration();
+    const t = ((e.clientX - r.left) / r.width) * duration();
+    if (mode === 'idle') showAt(t, true); else video.currentTime = t;
   });
 
   updateLoopLabel(); render(); updateSpeedUI();

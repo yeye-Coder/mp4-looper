@@ -11,18 +11,24 @@ val keystoreProps = Properties().apply {
 }
 
 // The web page used by the app = ../mp4-looper.html (copied in at build time as index.html).
-val htmlAssetsDir = layout.buildDirectory.dir("generated/htmlAssets").get().asFile
+val htmlAssetsDir = layout.buildDirectory.dir("generated/htmlAssets")
+
+val copyHtml by tasks.registering(Copy::class) {
+    from(rootProject.file("../mp4-looper.html"))
+    into(htmlAssetsDir)
+    rename { "index.html" }
+}
 
 android {
     namespace = "com.mp4looper.app"
-    compileSdk = 36
+    compileSdk = 37      // Android 17
 
     defaultConfig {
         applicationId = "com.mp4looper.app"
         minSdk = 29          // Android 10
-        targetSdk = 36       // Android 16
-        versionCode = 5
-        versionName = "1.4"
+        targetSdk = 37       // Android 17
+        versionCode = 7
+        versionName = "1.6"
     }
 
     signingConfigs {
@@ -46,12 +52,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    sourceSets["main"].assets.srcDir(htmlAssetsDir)
+    sourceSets["main"].assets.directories.add(htmlAssetsDir.get().asFile.path)
 }
 
-val copyHtml by tasks.registering(Copy::class) {
-    from(rootProject.file("../mp4-looper.html"))
-    into(htmlAssetsDir)
-    rename { "index.html" }
-}
 tasks.named("preBuild") { dependsOn(copyHtml) }
